@@ -3,8 +3,57 @@ import torch
 import whisper
 from pathlib import Path
 import onnx
+from onnx import external_data_helper
 from onnxruntime.quantization import quantize_dynamic, QuantType
 import tempfile
+
+
+def export_large_model_to_onnx(module, dummy_input, output_path, input_names, output_names, dynamic_axes):
+    """Export large models to ONNX with external data support."""
+    print(f"Exporting large model to {output_path}...")
+    
+    # Use external data by default for large models
+    temp_path = str(output_path).replace('.onnx', '_temp.onnx')
+    
+    try:
+        # Export with minimal settings to avoid 2GB issue
+        torch.onnx.export(
+            module,
+            dummy_input,
+            temp_path,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=14,
+            do_constant_folding=False,  # Disable to reduce model size during export
+            export_params=True,
+            keep_initializers_as_inputs=False,
+            verbose=False
+        )
+        
+        # Load the model and save with external data
+        model = onnx.load(temp_path)
+        
+        # Save with external data
+        data_filename = os.path.basename(str(output_path)).replace('.onnx', '.data')
+        onnx.save_model(
+            model, 
+            str(output_path),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=data_filename,
+            size_threshold=1024
+        )
+        
+        print(f"Model exported with external data file: {data_filename}")
+        
+    except Exception as e:
+        print(f"Export failed: {e}")
+        raise e
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
@@ -29,8 +78,8 @@ def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
     print("Exporting encoder to ONNX...")
     encoder_path = output_path / f"whisper_{model_name}_encoder.onnx"
     
-    # Export encoder
-    torch.onnx.export(
+    # Export encoder with large model support
+    export_large_model_to_onnx(
         model.encoder,
         dummy_mel,
         encoder_path,
@@ -39,9 +88,7 @@ def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
         dynamic_axes={
             "mel_spectrogram": {2: "time_steps"},
             "encoder_output": {1: "time_steps"}
-        },
-        opset_version=14,
-        do_constant_folding=True
+        }
     )
     
     print("Exporting decoder to ONNX...")
@@ -51,8 +98,8 @@ def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
     encoder_output_shape = (1, 1500, model.dims.n_audio_state)
     dummy_encoder_output = torch.randn(encoder_output_shape)
     
-    # Export decoder
-    torch.onnx.export(
+    # Export decoder with large model support
+    export_large_model_to_onnx(
         model.decoder,
         (dummy_tokens, dummy_encoder_output),
         decoder_path,
@@ -62,9 +109,7 @@ def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
             "tokens": {1: "token_length"},
             "encoder_output": {1: "time_steps"},
             "logits": {1: "token_length"}
-        },
-        opset_version=14,
-        do_constant_folding=True
+        }
     )
     
     print(f"ONNX models exported to {output_path}")
