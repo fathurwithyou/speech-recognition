@@ -1,16 +1,22 @@
 import asyncio
+import os
+
+from numpy import test
 import websockets
 import json
 import random
+import time
 
 async def test_speech_recognition():
     """Test speech recognition with TIMIT audio files."""
     uri = "ws://localhost:8765"
     
-    # Test with a few TIMIT files
-    test_files = ["0", "1", "10", "50", "100", "150"]  # File IDs without .wav extension
+    test_files = os.listdir("../timit_eval")
+    test_files = [f.split(".")[0] for f in test_files if f.endswith(".wav")]    
+    test_files = test_files[:20]  
     results_received = 0
     total_tasks = len(test_files)
+    start_time = time.perf_counter()
 
     try:
         async with websockets.connect(uri) as websocket:
@@ -56,6 +62,12 @@ async def test_speech_recognition():
         print("Start it with: python src/producer.py")
     except Exception as e:
         print(f"An error occurred: {e}")
+    finally:
+        end_time = time.perf_counter()
+        elapsed = end_time - start_time
+        print(f"Total time for {total_tasks} tasks: {elapsed:.2f} seconds")
+        if total_tasks > 0:
+            print(f"Average time per task: {elapsed / total_tasks:.2f} seconds")
 
 async def batch_transcription_test():
     """Test batch transcription of multiple random TIMIT files."""

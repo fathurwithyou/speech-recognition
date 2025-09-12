@@ -7,6 +7,27 @@ from queue import Queue, Empty
 import threading
 from audio_utils import load_audio_file, extract_mfcc_features, get_timit_file_path, model_based_speech_to_text
 
+# Pool initializer: load model once per worker process (Windows-safe)
+THREADS_COUNT = 8  # Number of threads per worker process
+def _pool_init():
+    try:
+        import torch as _torch
+        try:
+            _torch.set_num_threads(THREADS_COUNT)
+            _torch.set_num_interop_threads(THREADS_COUNT)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Load model once per worker
+    try:
+        from model_loader import load_model_if_needed
+        load_model_if_needed(0)
+    except Exception:
+        # Fallback is handled in model_based_speech_to_text
+        pass
+
 # Standalone worker function for multiprocessing (must be at module level)
 def process_single_task_worker(task_data):
     """Process a single speech recognition task (standalone function for multiprocessing)."""
@@ -96,11 +117,9 @@ class MultiprocessingConsumerWorker:
         
         # Task batching
         self.pending_tasks = Queue()
+        self.result_actions = Queue()
         self.batch_processor_thread = None
         self.shutdown_event = threading.Event()
-        
-        # Process ID counter for distributing Whisper models
-        self.process_counter = 0
         
         # Statistics
         self.stats = {
@@ -114,20 +133,10 @@ class MultiprocessingConsumerWorker:
         
     def start_worker_pool(self):
         """Start multiprocessing pool and initialize Whisper models."""
-        # Initialize Whisper models for all processes first
-        from model_loader import load_all_models
-        
-        print(f"🔄 Initializing {self.worker_pool_size} Whisper models...")
-        models_loaded = load_all_models(self.worker_pool_size)
-        
-        if not models_loaded:
-            print("⚠️  Failed to load Whisper models - will use fallback transcription")
-        
-        self.pool = mp.Pool(processes=self.worker_pool_size)
+        # Create the pool; each worker loads its model once in initializer
+        self.pool = mp.Pool(processes=self.worker_pool_size, initializer=_pool_init)
         print(f"✅ Started multiprocessing pool with {self.worker_pool_size} workers")
-        
-        if models_loaded:
-            print(f"🎤 Each worker process has its own Whisper model instance")
+        print("🎤 Each worker process will load its own model once")
         
     def stop_worker_pool(self):
         """Stop multiprocessing pool."""
@@ -196,12 +205,8 @@ class MultiprocessingConsumerWorker:
                 'data': task['data']
             }
             
-            # Assign process ID for distributing across Whisper model instances
-            process_id = self.process_counter % self.worker_pool_size
-            self.process_counter += 1
-            
-            # Prepare data for multiprocessing (no thread locks)
-            serializable_data = (task_dict, task['task_id'], task['data'], start_time, process_id)
+            # Use a fixed process_id per worker (0) so each worker keeps one model
+            serializable_data = (task_dict, task['task_id'], task['data'], start_time, 0)
             mp_task_data.append(serializable_data)
             
             # Store metadata we need for result handling
@@ -245,13 +250,23 @@ class MultiprocessingConsumerWorker:
                 self.stats['tasks_failed'] += 1
                 # Acknowledge the failed task
                 if i < len(task_metadata):
-                    self.channel.basic_nack(delivery_tag=task_metadata[i]['delivery_tag'], requeue=True)
+                    # Defer RabbitMQ operation to main thread
+                    self.result_actions.put({
+                        'type': 'nack',
+                        'delivery_tag': task_metadata[i]['delivery_tag'],
+                        'requeue': True
+                    })
             except Exception as e:
                 print(f"Task processing error: {e}")
                 self.stats['tasks_failed'] += 1
                 # Acknowledge the failed task
                 if i < len(task_metadata):
-                    self.channel.basic_nack(delivery_tag=task_metadata[i]['delivery_tag'], requeue=True)
+                    # Defer RabbitMQ operation to main thread
+                    self.result_actions.put({
+                        'type': 'nack',
+                        'delivery_tag': task_metadata[i]['delivery_tag'],
+                        'requeue': True
+                    })
         
         self.stats['batches_processed'] += 1
         batch_time = time.time() - batch_start
@@ -262,38 +277,73 @@ class MultiprocessingConsumerWorker:
         task = result['task']
         delivery_tag = result['delivery_tag']
         
+        # All RabbitMQ operations must be performed on the main thread.
+        # Queue a single action for the main loop to execute.
+        action = {
+            'type': 'complete',
+            'delivery_tag': delivery_tag,
+            'success': result['success'],
+            'task_id': task.get('task_id'),
+            'worker_pid': result.get('worker_pid')
+        }
+        if result['success']:
+            action['client_id'] = task.get('client_id')
+            action['payload'] = {
+                'task_id': task.get('task_id'),
+                'result': result['result']
+            }
+        else:
+            action['error'] = result.get('error', 'Unknown error')
+        self.result_actions.put(action)
+
+    def _drain_result_actions(self):
+        """Execute queued RabbitMQ actions from the main thread only."""
         try:
-            if result['success']:
-                # Send result back via RabbitMQ
-                client_id = task.get('client_id')
-                if client_id:
-                    result_channel = f"result_{client_id}"
-                    result_data = {
-                        'task_id': task.get('task_id'),
-                        'result': result['result']
-                    }
-                    
-                    self.channel.basic_publish(
-                        exchange='',
-                        routing_key=result_channel,
-                        body=json.dumps(result_data)
-                    )
-                
-                self.stats['tasks_completed'] += 1
-                print(f"Task {task['task_id']} completed successfully (worker PID: {result['worker_pid']})")
-            
-            else:
-                # Handle error
-                print(f"Task {task['task_id']} failed: {result.get('error', 'Unknown error')}")
-                self.stats['tasks_failed'] += 1
-            
-            # Acknowledge the message
-            self.channel.basic_ack(delivery_tag=delivery_tag)
-            
+            while True:
+                action = self.result_actions.get_nowait()
+                try:
+                    if action['type'] == 'nack':
+                        self._safe_basic_nack(action['delivery_tag'], action.get('requeue', True))
+                    elif action['type'] == 'complete':
+                        if action['success']:
+                            # Publish result if client_id is available
+                            client_id = action.get('client_id')
+                            if client_id:
+                                result_channel = f"result_{client_id}"
+                                self._safe_basic_publish('', result_channel, json.dumps(action['payload']))
+                            self.stats['tasks_completed'] += 1
+                            print(f"Task {action['task_id']} completed successfully (worker PID: {action.get('worker_pid')})")
+                        else:
+                            print(f"Task {action['task_id']} failed: {action.get('error')}")
+                            self.stats['tasks_failed'] += 1
+                        # Ack after handling
+                        self._safe_basic_ack(action['delivery_tag'])
+                finally:
+                    # Mark task done for internal queue
+                    pass
+        except Empty:
+            return
+
+    def _safe_basic_publish(self, exchange, routing_key, body):
+        try:
+            if self.channel and getattr(self.channel, 'is_open', False):
+                self.channel.basic_publish(exchange=exchange, routing_key=routing_key, body=body)
         except Exception as e:
-            print(f"Error handling task result: {e}")
-            # Reject and requeue the message
-            self.channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            print(f"Publish failed: {e}")
+
+    def _safe_basic_ack(self, delivery_tag):
+        try:
+            if self.channel and getattr(self.channel, 'is_open', False):
+                self.channel.basic_ack(delivery_tag=delivery_tag)
+        except Exception as e:
+            print(f"Ack failed: {e}")
+
+    def _safe_basic_nack(self, delivery_tag, requeue=True):
+        try:
+            if self.channel and getattr(self.channel, 'is_open', False):
+                self.channel.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
+        except Exception as e:
+            print(f"Nack failed: {e}")
     
     def message_callback(self, ch, method, properties, body):
         """RabbitMQ message callback - adds tasks to processing queue."""
@@ -358,6 +408,8 @@ class MultiprocessingConsumerWorker:
             
             while True:
                 self.connection.process_data_events(time_limit=1)
+                # Drain any queued result actions (publish/ack/nack) from batch thread
+                self._drain_result_actions()
                 
                 if time.time() - last_stats_time >= 30:
                     self.print_stats()
