@@ -1,11 +1,57 @@
 import os
 import torch
+import torch.nn.functional as F
 import whisper
 from pathlib import Path
 import onnx
 from onnx import external_data_helper
 from onnxruntime.quantization import quantize_dynamic, QuantType
 import tempfile
+
+
+def patch_attention_for_onnx():
+    """Patch Whisper attention to be ONNX-compatible."""
+    
+    def onnx_compatible_qkv_attention(self, q, k, v, mask=None):
+        """ONNX-compatible version of qkv_attention."""
+        n_batch, n_ctx, n_state = q.shape
+        scale = (n_state // self.n_head) ** -0.25
+        q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
+        k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 3, 1) * scale
+        v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
+
+        qk = q @ k
+        if mask is not None:
+            # Ensure mask slicing is compatible with ONNX
+            if hasattr(mask, 'shape'):
+                mask_slice = mask[:n_ctx, :n_ctx]
+            else:
+                mask_slice = mask
+            qk = qk + mask_slice
+        
+        w = F.softmax(qk.float(), dim=-1).to(q.dtype)
+        return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2), qk.detach()
+    
+    def onnx_compatible_forward(self, x, xa=None, mask=None, kv_cache=None):
+        """ONNX-compatible forward for MultiHeadAttention."""
+        q = self.query(x)
+        
+        if kv_cache is None or xa is None or self.key not in kv_cache:
+            # cross-attention or no cache
+            k = self.key(xa if xa is not None else x)
+            v = self.value(xa if xa is not None else x)
+        else:
+            # cached self-attention
+            k, v = kv_cache[self.key], kv_cache[self.value]
+            
+        wv, qk = self.qkv_attention(q, k, v, mask)
+        return self.out(wv), qk
+    
+    # Patch the MultiHeadAttention class
+    import whisper.model
+    whisper.model.MultiHeadAttention.qkv_attention = onnx_compatible_qkv_attention
+    whisper.model.MultiHeadAttention.forward = onnx_compatible_forward
+    print("Patched Whisper attention for ONNX compatibility")
 
 
 def export_large_model_to_onnx(module, dummy_input, output_path, input_names, output_names, dynamic_axes):
@@ -62,6 +108,9 @@ def export_whisper_to_onnx(model_name="base", output_dir="onnx_models"):
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
+    
+    # Patch attention for ONNX compatibility
+    patch_attention_for_onnx()
     
     print(f"Loading Whisper model: {model_name}")
     model = whisper.load_model(model_name)
