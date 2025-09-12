@@ -211,14 +211,30 @@ def convert_whisper_to_onnx_int8(model_name="base", output_dir="onnx_models"):
     encoder_int8_path = quantize_onnx_model(encoder_path)
     decoder_int8_path = quantize_onnx_model(decoder_path)
     
-    if encoder_int8_path and decoder_int8_path:
-        print(f"✅ Successfully converted Whisper {model_name} to ONNX INT8")
+    # Check results and provide fallback
+    success_count = 0
+    if encoder_int8_path:
+        print(f"✅ Encoder quantized: {encoder_int8_path}")
+        success_count += 1
+    else:
+        print(f"⚠️  Encoder quantization failed, using FP32: {encoder_path}")
+        encoder_int8_path = encoder_path
+    
+    if decoder_int8_path:
+        print(f"✅ Decoder quantized: {decoder_int8_path}")
+        success_count += 1
+    else:
+        print(f"⚠️  Decoder quantization failed, using FP32: {decoder_path}")
+        decoder_int8_path = decoder_path
+    
+    if success_count > 0:
+        print(f"✅ Conversion completed with {success_count}/2 models quantized")
         print(f"Encoder: {encoder_int8_path}")
         print(f"Decoder: {decoder_int8_path}")
         return encoder_int8_path, decoder_int8_path
     else:
-        print("❌ Conversion failed")
-        return None, None
+        print("⚠️  No models quantized, but FP32 models available")
+        return encoder_path, decoder_path
 
 
 if __name__ == "__main__":

@@ -235,16 +235,26 @@ class WhisperONNXModelLoader:
             try:
                 load_start = time.time()
                 
-                # Paths to ONNX models
-                encoder_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_encoder_int8.onnx")
-                decoder_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_decoder_int8.onnx")
+                # Try INT8 models first, fallback to FP32
+                encoder_int8_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_encoder_int8.onnx")
+                decoder_int8_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_decoder_int8.onnx")
+                encoder_fp32_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_encoder.onnx")
+                decoder_fp32_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_decoder.onnx")
+                
+                # Choose best available models
+                encoder_path = encoder_int8_path if os.path.exists(encoder_int8_path) else encoder_fp32_path
+                decoder_path = decoder_int8_path if os.path.exists(decoder_int8_path) else decoder_fp32_path
                 
                 if not os.path.exists(encoder_path) or not os.path.exists(decoder_path):
-                    print(f"ONNX models not found. Expected:")
-                    print(f"  {encoder_path}")
-                    print(f"  {decoder_path}")
+                    print(f"ONNX models not found. Expected one of:")
+                    print(f"  Encoder: {encoder_int8_path} or {encoder_fp32_path}")
+                    print(f"  Decoder: {decoder_int8_path} or {decoder_fp32_path}")
                     print("Run convert_to_onnx.py to generate them.")
                     return False
+                
+                encoder_type = "INT8" if "int8" in os.path.basename(encoder_path) else "FP32"
+                decoder_type = "INT8" if "int8" in os.path.basename(decoder_path) else "FP32"
+                print(f"Using encoder: {encoder_type}, decoder: {decoder_type}")
                 
                 print(f"Loading ONNX Whisper {self.model_name} models...")
                 
@@ -258,10 +268,12 @@ class WhisperONNXModelLoader:
                 
                 self.model_info = {
                     'load_time': time.time() - load_start,
-                    'model_type': 'Whisper ONNX INT8',
+                    'model_type': f'Whisper ONNX (Encoder: {encoder_type}, Decoder: {decoder_type})',
                     'model_name': self.model_name,
                     'encoder_path': encoder_path,
                     'decoder_path': decoder_path,
+                    'encoder_precision': encoder_type,
+                    'decoder_precision': decoder_type,
                     'onnx_version': ort.__version__
                 }
                 
