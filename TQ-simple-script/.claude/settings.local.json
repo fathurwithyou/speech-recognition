@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Read(//c/Users/Ellipsis/Documents/speech-recognition/timit_eval/**)",
-      "Read(//c/Users/Ellipsis/Documents/speech-recognition/**)"
+      "Read(//c/Users/Ellipsis/Documents/speech-recognition/**)",
+      "Read(//c/Users/Ellipsis/Documents/**)"
     ],
     "deny": [],
     "ask": []

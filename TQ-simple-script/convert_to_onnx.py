@@ -176,7 +176,23 @@ def quantize_onnx_model(model_path, output_path=None):
     print(f"Quantizing {model_path} to INT8...")
     
     try:
-        # Try with optimize_model first (newer versions)
+        # Check if external data file exists (simpler detection)
+        model_dir = Path(model_path).parent
+        data_file = model_dir / (Path(model_path).stem + ".data")
+        
+        if data_file.exists():
+            print("Model has external data file, skipping quantization (may cause corruption)")
+            print("FP32 ONNX is still much faster than PyTorch models")
+            return None
+            
+        # Also check for large model names that typically have external data
+        if any(size in str(model_path).lower() for size in ['large', 'medium']):
+            print("Large model detected, skipping quantization to avoid corruption")
+            print("FP32 ONNX is still much faster than PyTorch models")
+            return None
+        
+        # Standard quantization for smaller models without external data
+        print("Proceeding with quantization for smaller model...")
         try:
             quantize_dynamic(
                 model_input=str(model_path),
@@ -185,15 +201,25 @@ def quantize_onnx_model(model_path, output_path=None):
                 optimize_model=True
             )
         except TypeError:
-            # Fallback for older versions without optimize_model parameter
             quantize_dynamic(
                 model_input=str(model_path),
                 model_output=str(output_path),
                 weight_type=QuantType.QInt8
             )
         
-        print(f"Quantized model saved to {output_path}")
-        return output_path
+        # Verify the quantized model can be loaded
+        try:
+            test_model = onnx.load(str(output_path))
+            onnx.checker.check_model(test_model)
+            print(f"✅ Quantized model saved and verified: {output_path}")
+            return output_path
+        except Exception as verify_error:
+            print(f"❌ Quantized model verification failed: {verify_error}")
+            # Clean up corrupted file
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+            return None
+            
     except Exception as e:
         print(f"Quantization failed: {e}")
         return None
