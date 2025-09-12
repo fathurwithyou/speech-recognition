@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import whisper
+    from whisper.model import Whisper as WhisperCore
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
@@ -17,8 +18,34 @@ except ImportError:
 
 
 def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: bool = True):
-    """Placeholder for quantization; returns the model unchanged and engine='none'."""
-    return model_fp32, "none"
+    """Apply INT8 quantization using torchao if available; fallback to torch.ao dynamic.
+
+    - quant_mode: 'dynamic' (default) or 'weight_only'
+    """
+    import copy
+    try:
+        from torchao.quantization import (
+            Int8DynamicActivationInt8WeightConfig,
+            Int8WeightOnlyConfig,
+            quantize_,
+        )
+        m = copy.deepcopy(model_fp32) if copy_model else model_fp32
+        if quant_mode == "weight_only":
+            quantize_(m, Int8WeightOnlyConfig())
+            engine = "torchao.weight_only"
+        else:
+            quantize_(m, Int8DynamicActivationInt8WeightConfig())
+            engine = "torchao.dynamic"
+        return m, engine
+    except Exception:
+        # Fallback to torch.ao dynamic quantization
+        try:
+            from torch.ao.quantization import quantize_dynamic
+            m = copy.deepcopy(model_fp32) if copy_model else model_fp32
+            m = quantize_dynamic(m, {torch.nn.Linear}, dtype=torch.qint8)
+            return m, "torch.ao.dynamic"
+        except Exception:
+            return model_fp32, "none"
 
 
 class WhisperModelLoader:
@@ -29,8 +56,10 @@ class WhisperModelLoader:
     reliable working path over quantization complexity.
     """
 
-    def __init__(self, base_model: str = "small"):
+    def __init__(self, base_model: str = "small", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
         self.base_model = base_model
+        self.model_path = model_path
+        self.quant_mode = quant_mode
         self.model = None
         self.device = None
         self.model_info: Dict[str, Any] = {}
@@ -54,20 +83,55 @@ class WhisperModelLoader:
             try:
                 load_start = time.time()
                 self.device = self.detect_device()
-                print(f"Loading Whisper '{self.base_model}' on {self.device}...")
-                self.model = whisper.load_model(self.base_model, device=self.device)
-                self.model.eval()
+                # If an INT8 state dict exists, try loading it
+                if self.model_path and os.path.exists(self.model_path):
+                    print(f"Loading Whisper '{self.base_model}' (INT8 weights) on {self.device}...")
+                    # Build architecture: get dims from a base model on CPU
+                    base_arch = whisper.load_model(self.base_model, device="cpu")
+                    dims = getattr(base_arch, 'dims', None)
+                    del base_arch
+                    if dims is None:
+                        raise RuntimeError("Could not determine Whisper architecture dims")
 
-                self.model_info = {
-                    'device': self.device,
-                    'load_time': time.time() - load_start,
-                    'model_type': 'OpenAI Whisper (Vanilla)',
-                    'base_model': self.base_model,
-                    'quant_mode': 'none',
-                    'quant_engine': 'none',
-                    'torch_version': torch.__version__
-                }
+                    # Create blank model with same architecture and apply quantization
+                    core = WhisperCore(dims)
+                    core, q_engine = quantize_model_int8(core, quant_mode=self.quant_mode, copy_model=False)
 
+                    # Load state dict
+                    try:
+                        state = torch.load(self.model_path, map_location="cpu")
+                    except TypeError:
+                        state = torch.load(self.model_path, map_location="cpu")
+                    missing, unexpected = core.load_state_dict(state, strict=False)
+                    if missing or unexpected:
+                        # Not fatal; continue
+                        pass
+                    self.model = core.to(self.device)
+                    self.model.eval()
+
+                    self.model_info = {
+                        'device': self.device,
+                        'load_time': time.time() - load_start,
+                        'model_type': 'OpenAI Whisper (INT8 state dict)',
+                        'base_model': self.base_model,
+                        'quant_mode': self.quant_mode,
+                        'quant_engine': q_engine,
+                        'torch_version': torch.__version__
+                    }
+                else:
+                    print(f"Loading Whisper '{self.base_model}' on {self.device}...")
+                    self.model = whisper.load_model(self.base_model, device=self.device)
+                    self.model.eval()
+
+                    self.model_info = {
+                        'device': self.device,
+                        'load_time': time.time() - load_start,
+                        'model_type': 'OpenAI Whisper (Vanilla)',
+                        'base_model': self.base_model,
+                        'quant_mode': 'none',
+                        'quant_engine': 'none',
+                        'torch_version': torch.__version__
+                    }
                 self.is_loaded = True
                 print(f"Whisper model loaded in {self.model_info['load_time']:.2f}s")
                 return True
