@@ -1,7 +1,5 @@
 import asyncio
 import os
-
-from numpy import test
 import websockets
 import json
 import random
@@ -25,11 +23,23 @@ async def test_speech_recognition():
 
             # Send audio file processing requests
             for file_id in test_files:
-                print(f"> Requesting transcription for TIMIT file: {file_id}.wav")
-                await websocket.send(file_id)
-                response = await websocket.recv()
-                print(f"< Server response: {response}")
-                await asyncio.sleep(0.5)
+                wav_path = f"../timit_eval/{file_id}.wav"
+                if os.path.exists(wav_path):
+                    print(f"> Sending WAV file: {file_id}.wav")
+                    with open(wav_path, "rb") as f:
+                        wav_data = f.read()
+                    
+                    # Send file metadata and data
+                    message = {
+                        "file_id": file_id,
+                        "data": wav_data.hex()
+                    }
+                    await websocket.send(json.dumps(message))
+                    response = await websocket.recv()
+                    print(f"< Server response: {response}")
+                    await asyncio.sleep(0.5)
+                else:
+                    print(f"Warning: File {wav_path} not found")
             
             print("\nFinished sending requests. Waiting for transcription results...")
             print("=" * 60)
@@ -86,9 +96,20 @@ async def batch_transcription_test():
             
             # Send all requests quickly
             for file_id in random_files:
-                await websocket.send(file_id)
-                response = await websocket.recv()
-                print(f"Queued: {file_id}.wav")
+                wav_path = f"../timit_eval/{file_id}.wav"
+                if os.path.exists(wav_path):
+                    with open(wav_path, "rb") as f:
+                        wav_data = f.read()
+                    
+                    message = {
+                        "file_id": file_id,
+                        "data": wav_data.hex()
+                    }
+                    await websocket.send(json.dumps(message))
+                    response = await websocket.recv()
+                    print(f"Queued: {file_id}.wav")
+                else:
+                    print(f"Warning: File {wav_path} not found")
             
             print("\nWaiting for batch transcription results...")
             print("=" * 60)

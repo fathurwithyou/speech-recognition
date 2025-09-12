@@ -3,6 +3,8 @@ import websockets
 import pika
 import json
 import uuid
+import tempfile
+import os
 from datetime import datetime, timezone
 from functools import partial
 import threading
@@ -56,13 +58,44 @@ async def handler(websocket, rabbitmq_channel, client_id):
     try:
         async for message in websocket:
             task_id = str(uuid.uuid4())
-            print(f"Received message: {message}, assigned task ID: {task_id}")
-            task = {
-                'task_id': task_id,
-                'client_id': client_id,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'data': message
-            }
+            
+            try:
+                # Try to parse as JSON (new format with binary data)
+                data = json.loads(message)
+                file_id = data.get('file_id')
+                wav_hex = data.get('data')
+                
+                if file_id and wav_hex:
+                    # Save binary data to temp file
+                    wav_data = bytes.fromhex(wav_hex)
+                    temp_fd, temp_path = tempfile.mkstemp(suffix='.wav', prefix=f'{file_id}_')
+                    with os.fdopen(temp_fd, 'wb') as f:
+                        f.write(wav_data)
+                    
+                    print(f"Received WAV file: {file_id}.wav ({len(wav_data)} bytes), saved to {temp_path}")
+                    
+                    task = {
+                        'task_id': task_id,
+                        'client_id': client_id,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'file_id': file_id,
+                        'temp_path': temp_path
+                    }
+                else:
+                    raise ValueError("Missing file_id or data")
+                    
+            except (json.JSONDecodeError, ValueError):
+                # Fallback to old format (just file_id string)
+                file_id = message
+                print(f"Received file_id: {file_id}, assigned task ID: {task_id}")
+                
+                task = {
+                    'task_id': task_id,
+                    'client_id': client_id,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'file_id': file_id,
+                    'temp_path': None  # Will use TIMIT directory
+                }
             
             rabbitmq_channel.basic_publish(
                 exchange='',

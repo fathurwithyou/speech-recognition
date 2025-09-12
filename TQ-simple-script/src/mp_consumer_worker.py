@@ -35,17 +35,21 @@ def _pool_init(threads_per_model: int):
 def process_single_task_worker(task_data):
     """Process a single speech recognition task (standalone function for multiprocessing)."""
     # Extract only the serializable data
-    task_dict, task_id, file_id, start_time, process_id = task_data
+    task_dict, task_id, file_id, temp_path, start_time, process_id = task_data
     
     try:
-        # Get the file path
-        file_path = get_timit_file_path(file_id, base_path="../timit_eval")
-        if not file_path:
+        # Use temp_path if provided, otherwise use TIMIT directory
+        if temp_path:
+            file_path = temp_path
+        else:
+            file_path = get_timit_file_path(file_id, base_path="../timit_eval")
+            
+        if not file_path or not os.path.exists(file_path):
             return {
                 'task_id': task_id,
                 'file_id': file_id,
                 'success': False,
-                'error': f"Audio file {file_id}.wav not found",
+                'error': f"Audio file not found: {temp_path if temp_path else f'{file_id}.wav'}",
                 'processing_time': time.time() - start_time,
                 'worker_pid': os.getpid()
             }
@@ -66,6 +70,13 @@ def process_single_task_worker(task_data):
             'worker_pid': os.getpid()
         }
         
+        # Clean up temp file if it was used
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp file {temp_path}: {e}")
+        
         return {
             'task_dict': task_dict,  # Return original task dict
             'task_id': task_id,
@@ -76,6 +87,13 @@ def process_single_task_worker(task_data):
         }
         
     except Exception as e:
+        # Clean up temp file even on failure
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception as cleanup_error:
+                print(f"Warning: Could not delete temp file {temp_path}: {cleanup_error}")
+        
         return {
             'task_dict': task_dict,
             'task_id': task_id,
@@ -194,11 +212,14 @@ class MultiprocessingConsumerWorker:
                 'task_id': task['task_id'],
                 'client_id': task.get('client_id'),
                 'timestamp': task.get('timestamp'),
-                'data': task['data']
+                'file_id': task.get('file_id'),
+                'temp_path': task.get('temp_path')
             }
             
             # Use a fixed process_id per worker (0) so each worker keeps one model
-            serializable_data = (task_dict, task['task_id'], task['data'], start_time, 0)
+            file_id = task.get('file_id')
+            temp_path = task.get('temp_path')
+            serializable_data = (task_dict, task['task_id'], file_id, temp_path, start_time, 0)
             mp_task_data.append(serializable_data)
             
             # Store metadata we need for result handling
