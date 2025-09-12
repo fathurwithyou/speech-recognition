@@ -13,7 +13,7 @@ try:
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
-    print("⚠️ OpenAI Whisper not available. Install with: pip install openai-whisper")
+    print("OpenAI Whisper not available. Install with: pip install openai-whisper")
 
 
 def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: bool = True):
@@ -48,7 +48,7 @@ class WhisperModelLoader:
                 return True
 
             if not WHISPER_AVAILABLE:
-                print("❌ OpenAI Whisper not available. Install with: pip install openai-whisper")
+                print("OpenAI Whisper not available. Install with: pip install openai-whisper")
                 return False
 
             try:
@@ -69,11 +69,11 @@ class WhisperModelLoader:
                 }
 
                 self.is_loaded = True
-                print(f"✅ Whisper model loaded in {self.model_info['load_time']:.2f}s")
+                print(f"Whisper model loaded in {self.model_info['load_time']:.2f}s")
                 return True
 
             except Exception as e:
-                print(f"❌ Failed to load Whisper model: {e}")
+                print(f"Failed to load Whisper model: {e}")
                 logger.error(f"Model loading error: {e}")
                 self.is_loaded = False
                 return False
@@ -111,7 +111,7 @@ class WhisperModelLoader:
             }
 
         except Exception as e:
-            print(f"❌ Whisper inference error for {file_id}: {e}")
+            print(f"Whisper inference error for {file_id}: {e}")
             return {
                 'transcription': f'WHISPER_ERROR: {str(e)[:80]}',
                 'confidence': 0.0,
@@ -135,19 +135,15 @@ class WhisperModelLoader:
             return 0.5
 
 
-# Global instances for multiprocessing
 _model_loaders: Dict[int, WhisperModelLoader] = {}
-
 
 def get_model_loader(process_id: int = 0) -> WhisperModelLoader:
     if process_id not in _model_loaders:
         _model_loaders[process_id] = WhisperModelLoader()
     return _model_loaders[process_id]
 
-
 def get_multiprocess_loaders(num_processes: int = 4) -> Dict[int, WhisperModelLoader]:
     return {i: get_model_loader(i) for i in range(num_processes)}
-
 
 def load_model_if_needed(process_id: int = 0) -> bool:
     loader = get_model_loader(process_id)
@@ -157,14 +153,10 @@ def load_model_if_needed(process_id: int = 0) -> bool:
 
 
 def load_all_models(num_processes: int = 4) -> bool:
-    print(f"📦 Loading {num_processes} Whisper model instances...")
     ok = 0
     for i in range(num_processes):
-        print(f"Loading model for process {i+1}/{num_processes}...")
         if load_model_if_needed(i):
             ok += 1
-        else:
-            print(f"❌ Failed to load model for process {i}")
-    print(f"✅ Loaded {ok}/{num_processes} model instances")
+    print(f"Loaded {ok}/{num_processes} model instances")
     return ok > 0
 

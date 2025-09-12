@@ -5,10 +5,10 @@ import os
 import multiprocessing as mp
 from queue import Queue, Empty
 import threading
-from audio_utils import load_audio_file, extract_mfcc_features, get_timit_file_path, model_based_speech_to_text
+from audio_utils import get_timit_file_path, model_based_speech_to_text
 
 # Pool initializer: load model once per worker process (Windows-safe)
-THREADS_COUNT = 8  # Number of threads per worker process
+THREADS_COUNT = 8 
 def _pool_init():
     try:
         import torch as _torch
@@ -20,12 +20,10 @@ def _pool_init():
     except Exception:
         pass
 
-    # Load model once per worker
     try:
         from model_loader import load_model_if_needed
         load_model_if_needed(0)
     except Exception:
-        # Fallback is handled in model_based_speech_to_text
         pass
 
 # Standalone worker function for multiprocessing (must be at module level)
@@ -50,31 +48,15 @@ def process_single_task_worker(task_data):
         # Generate transcription using Whisper model with specific process ID
         transcription_result = model_based_speech_to_text(file_path, file_id, use_model=True, process_id=process_id)
         
-        # Load audio for additional info
-        audio_data, sample_rate = load_audio_file(file_path)
-        features = extract_mfcc_features(audio_data, sample_rate)
-        
-        # Simulate additional processing time if needed
-        base_processing_time = min(3.0, len(audio_data) / sample_rate * 0.5)
-        actual_inference_time = transcription_result.get('inference_time', 0.1)
-        
-        # Add some delay to simulate realistic processing if inference was too fast
-        if actual_inference_time < base_processing_time * 0.3:
-            additional_delay = (base_processing_time * 0.3) - actual_inference_time
-            time.sleep(additional_delay)
-            total_processing_time = base_processing_time * 0.3
-        else:
-            total_processing_time = actual_inference_time
+        # Basic metadata without extra feature extraction
+        actual_inference_time = transcription_result.get('inference_time', 0.0)
         
         result_data = {
             'file_id': file_id,
             'transcription': transcription_result['transcription'],
             'confidence': transcription_result.get('confidence', 0.0),
             'model_used': transcription_result.get('model_used', 'unknown'),
-            'duration_seconds': len(audio_data) / sample_rate,
-            'sample_rate': sample_rate,
-            'num_features': len(features),
-            'processing_time': total_processing_time,
+            'processing_time': actual_inference_time,
             'inference_time': actual_inference_time,
             'worker_pid': os.getpid()
         }
@@ -135,8 +117,8 @@ class MultiprocessingConsumerWorker:
         """Start multiprocessing pool and initialize Whisper models."""
         # Create the pool; each worker loads its model once in initializer
         self.pool = mp.Pool(processes=self.worker_pool_size, initializer=_pool_init)
-        print(f"✅ Started multiprocessing pool with {self.worker_pool_size} workers")
-        print("🎤 Each worker process will load its own model once")
+        print(f"Started multiprocessing pool with {self.worker_pool_size} workers")
+        print("Each worker process will load its model once")
         
     def stop_worker_pool(self):
         """Stop multiprocessing pool."""
@@ -312,7 +294,6 @@ class MultiprocessingConsumerWorker:
                                 result_channel = f"result_{client_id}"
                                 self._safe_basic_publish('', result_channel, json.dumps(action['payload']))
                             self.stats['tasks_completed'] += 1
-                            print(f"Task {action['task_id']} completed successfully (worker PID: {action.get('worker_pid')})")
                         else:
                             print(f"Task {action['task_id']} failed: {action.get('error')}")
                             self.stats['tasks_failed'] += 1
@@ -364,7 +345,7 @@ class MultiprocessingConsumerWorker:
         runtime = time.time() - self.stats['start_time']
         throughput = self.stats['tasks_completed'] / runtime if runtime > 0 else 0
         
-        print(f"\n📊 WORKER STATS (PID: {self.stats['worker_pid']}):")
+        print(f"\nWORKER STATS (PID: {self.stats['worker_pid']}):")
         print(f"   Runtime: {runtime:.1f}s")
         print(f"   Received: {self.stats['tasks_received']}")
         print(f"   Completed: {self.stats['tasks_completed']}")
@@ -396,7 +377,7 @@ class MultiprocessingConsumerWorker:
             # Set up RabbitMQ consumer
             self.channel.basic_consume(queue=QUEUE_TASK, on_message_callback=self.message_callback)
             
-            print(f"🚀 Multiprocessing Consumer Worker started!")
+            print("Multiprocessing consumer worker started")
             print(f"   Pool size: {self.worker_pool_size}")
             print(f"   Batch size: {self.batch_size}")
             print(f"   Batch timeout: {self.batch_timeout}s")
@@ -416,15 +397,15 @@ class MultiprocessingConsumerWorker:
                     last_stats_time = time.time()
                     
         except KeyboardInterrupt:
-            print("\n⏹️  Shutting down worker...")
+            print("\nShutting down worker...")
         except Exception as e:
-            print(f"❌ Worker error: {e}")
+            print(f"Worker error: {e}")
         finally:
             self.shutdown()
     
     def shutdown(self):
         """Clean shutdown of worker."""
-        print("🔄 Shutting down multiprocessing consumer worker...")
+        print("Shutting down multiprocessing consumer worker...")
         
         # Stop batch processor
         self.shutdown_event.set()
@@ -445,7 +426,7 @@ class MultiprocessingConsumerWorker:
         
         # Final stats
         self.print_stats()
-        print("✅ Worker shutdown complete")
+        print("Worker shutdown complete")
 
 if __name__ == "__main__":
     import argparse
