@@ -1,0 +1,414 @@
+import pika
+import json
+import time
+import os
+import multiprocessing as mp
+from queue import Queue, Empty
+import threading
+from audio_utils import load_audio_file, extract_mfcc_features, get_timit_file_path, model_based_speech_to_text
+
+# Standalone worker function for multiprocessing (must be at module level)
+def process_single_task_worker(task_data):
+    """Process a single speech recognition task (standalone function for multiprocessing)."""
+    # Extract only the serializable data
+    task_dict, task_id, file_id, start_time, process_id = task_data
+    
+    try:
+        # Get the file path
+        file_path = get_timit_file_path(file_id, base_path="../timit_eval")
+        if not file_path:
+            return {
+                'task_id': task_id,
+                'file_id': file_id,
+                'success': False,
+                'error': f"Audio file {file_id}.wav not found",
+                'processing_time': time.time() - start_time,
+                'worker_pid': os.getpid()
+            }
+        
+        # Generate transcription using Whisper model with specific process ID
+        transcription_result = model_based_speech_to_text(file_path, file_id, use_model=True, process_id=process_id)
+        
+        # Load audio for additional info
+        audio_data, sample_rate = load_audio_file(file_path)
+        features = extract_mfcc_features(audio_data, sample_rate)
+        
+        # Simulate additional processing time if needed
+        base_processing_time = min(3.0, len(audio_data) / sample_rate * 0.5)
+        actual_inference_time = transcription_result.get('inference_time', 0.1)
+        
+        # Add some delay to simulate realistic processing if inference was too fast
+        if actual_inference_time < base_processing_time * 0.3:
+            additional_delay = (base_processing_time * 0.3) - actual_inference_time
+            time.sleep(additional_delay)
+            total_processing_time = base_processing_time * 0.3
+        else:
+            total_processing_time = actual_inference_time
+        
+        result_data = {
+            'file_id': file_id,
+            'transcription': transcription_result['transcription'],
+            'confidence': transcription_result.get('confidence', 0.0),
+            'model_used': transcription_result.get('model_used', 'unknown'),
+            'duration_seconds': len(audio_data) / sample_rate,
+            'sample_rate': sample_rate,
+            'num_features': len(features),
+            'processing_time': total_processing_time,
+            'inference_time': actual_inference_time,
+            'worker_pid': os.getpid()
+        }
+        
+        return {
+            'task_dict': task_dict,  # Return original task dict
+            'task_id': task_id,
+            'success': True,
+            'result': result_data,
+            'total_time': time.time() - start_time,
+            'worker_pid': os.getpid()
+        }
+        
+    except Exception as e:
+        return {
+            'task_dict': task_dict,
+            'task_id': task_id,
+            'file_id': file_id,
+            'success': False,
+            'error': str(e),
+            'processing_time': time.time() - start_time,
+            'worker_pid': os.getpid()
+        }
+
+RABBITMQ_HOST = 'localhost'
+RABBITMQ_PORT = 5672
+QUEUE_TASK = 'audio_processing_queue'
+
+class MultiprocessingConsumerWorker:
+    """RabbitMQ consumer with multiprocessing pool for concurrent task processing."""
+    
+    def __init__(self, worker_pool_size=4, batch_size=5, batch_timeout=2.0):
+        self.worker_pool_size = worker_pool_size
+        self.batch_size = batch_size
+        self.batch_timeout = batch_timeout
+        
+        self.connection = None
+        self.channel = None
+        self.pool = None
+        
+        # Task batching
+        self.pending_tasks = Queue()
+        self.batch_processor_thread = None
+        self.shutdown_event = threading.Event()
+        
+        # Process ID counter for distributing Whisper models
+        self.process_counter = 0
+        
+        # Statistics
+        self.stats = {
+            'tasks_received': 0,
+            'tasks_completed': 0,
+            'tasks_failed': 0,
+            'batches_processed': 0,
+            'start_time': time.time(),
+            'worker_pid': os.getpid()
+        }
+        
+    def start_worker_pool(self):
+        """Start multiprocessing pool and initialize Whisper models."""
+        # Initialize Whisper models for all processes first
+        from model_loader import load_all_models
+        
+        print(f"🔄 Initializing {self.worker_pool_size} Whisper models...")
+        models_loaded = load_all_models(self.worker_pool_size)
+        
+        if not models_loaded:
+            print("⚠️  Failed to load Whisper models - will use fallback transcription")
+        
+        self.pool = mp.Pool(processes=self.worker_pool_size)
+        print(f"✅ Started multiprocessing pool with {self.worker_pool_size} workers")
+        
+        if models_loaded:
+            print(f"🎤 Each worker process has its own Whisper model instance")
+        
+    def stop_worker_pool(self):
+        """Stop multiprocessing pool."""
+        if self.pool:
+            print("Shutting down worker pool...")
+            self.pool.close()
+            self.pool.join()
+            print("Worker pool shutdown complete")
+    
+    
+    def batch_processor(self):
+        """Background thread that processes tasks in batches."""
+        batch = []
+        last_batch_time = time.time()
+        
+        while not self.shutdown_event.is_set():
+            try:
+                # Try to get a task (with timeout)
+                task_data = self.pending_tasks.get(timeout=0.5)
+                batch.append(task_data)
+                
+                # Process batch if it's full or timeout reached
+                should_process = (
+                    len(batch) >= self.batch_size or
+                    (batch and time.time() - last_batch_time >= self.batch_timeout)
+                )
+                
+                if should_process:
+                    self.process_batch(batch)
+                    batch = []
+                    last_batch_time = time.time()
+                    
+            except Empty:
+                # No tasks available, process any pending batch
+                if batch and time.time() - last_batch_time >= self.batch_timeout:
+                    self.process_batch(batch)
+                    batch = []
+                    last_batch_time = time.time()
+            
+            except Exception as e:
+                print(f"Batch processor error: {e}")
+        
+        # Process remaining batch on shutdown
+        if batch:
+            self.process_batch(batch)
+    
+    def process_batch(self, batch):
+        """Process a batch of tasks using multiprocessing pool."""
+        if not batch:
+            return
+            
+        print(f"Processing batch of {len(batch)} tasks...")
+        batch_start = time.time()
+        
+        # Prepare serializable data for multiprocessing
+        mp_task_data = []
+        task_metadata = []
+        
+        for i, task_data in enumerate(batch):
+            task, delivery_tag, start_time = task_data
+            # Extract serializable parts
+            task_dict = {
+                'task_id': task['task_id'],
+                'client_id': task.get('client_id'),
+                'timestamp': task.get('timestamp'),
+                'data': task['data']
+            }
+            
+            # Assign process ID for distributing across Whisper model instances
+            process_id = self.process_counter % self.worker_pool_size
+            self.process_counter += 1
+            
+            # Prepare data for multiprocessing (no thread locks)
+            serializable_data = (task_dict, task['task_id'], task['data'], start_time, process_id)
+            mp_task_data.append(serializable_data)
+            
+            # Store metadata we need for result handling
+            task_metadata.append({
+                'original_task': task,
+                'delivery_tag': delivery_tag,
+                'task_id': task['task_id']
+            })
+        
+        # Submit all tasks to pool
+        async_results = []
+        for task_data in mp_task_data:
+            async_result = self.pool.apply_async(process_single_task_worker, (task_data,))
+            async_results.append(async_result)
+        
+        # Collect results
+        for i, async_result in enumerate(async_results):
+            try:
+                result = async_result.get(timeout=30)  # 30 second timeout per task
+                
+                # Combine result with original metadata
+                metadata = task_metadata[i]
+                combined_result = {
+                    'task': metadata['original_task'],
+                    'delivery_tag': metadata['delivery_tag'],
+                    'success': result['success'],
+                    'worker_pid': result['worker_pid']
+                }
+                
+                if result['success']:
+                    combined_result['result'] = result['result']
+                    combined_result['total_time'] = result['total_time']
+                else:
+                    combined_result['error'] = result['error']
+                    combined_result['processing_time'] = result['processing_time']
+                
+                self.handle_task_result(combined_result)
+                
+            except mp.TimeoutError:
+                print(f"Task timed out in multiprocessing")
+                self.stats['tasks_failed'] += 1
+                # Acknowledge the failed task
+                if i < len(task_metadata):
+                    self.channel.basic_nack(delivery_tag=task_metadata[i]['delivery_tag'], requeue=True)
+            except Exception as e:
+                print(f"Task processing error: {e}")
+                self.stats['tasks_failed'] += 1
+                # Acknowledge the failed task
+                if i < len(task_metadata):
+                    self.channel.basic_nack(delivery_tag=task_metadata[i]['delivery_tag'], requeue=True)
+        
+        self.stats['batches_processed'] += 1
+        batch_time = time.time() - batch_start
+        print(f"Batch completed in {batch_time:.2f}s (avg: {batch_time/len(batch):.2f}s per task)")
+    
+    def handle_task_result(self, result):
+        """Handle completed task result."""
+        task = result['task']
+        delivery_tag = result['delivery_tag']
+        
+        try:
+            if result['success']:
+                # Send result back via RabbitMQ
+                client_id = task.get('client_id')
+                if client_id:
+                    result_channel = f"result_{client_id}"
+                    result_data = {
+                        'task_id': task.get('task_id'),
+                        'result': result['result']
+                    }
+                    
+                    self.channel.basic_publish(
+                        exchange='',
+                        routing_key=result_channel,
+                        body=json.dumps(result_data)
+                    )
+                
+                self.stats['tasks_completed'] += 1
+                print(f"Task {task['task_id']} completed successfully (worker PID: {result['worker_pid']})")
+            
+            else:
+                # Handle error
+                print(f"Task {task['task_id']} failed: {result.get('error', 'Unknown error')}")
+                self.stats['tasks_failed'] += 1
+            
+            # Acknowledge the message
+            self.channel.basic_ack(delivery_tag=delivery_tag)
+            
+        except Exception as e:
+            print(f"Error handling task result: {e}")
+            # Reject and requeue the message
+            self.channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+    
+    def message_callback(self, ch, method, properties, body):
+        """RabbitMQ message callback - adds tasks to processing queue."""
+        try:
+            task = json.loads(body.decode('utf-8'))
+            self.stats['tasks_received'] += 1
+            
+            # Add to pending tasks queue for batch processing
+            task_data = (task, method.delivery_tag, time.time())
+            self.pending_tasks.put(task_data)
+            
+        except Exception as e:
+            print(f"Error processing message: {e}")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+    
+    def print_stats(self):
+        """Print current worker statistics."""
+        runtime = time.time() - self.stats['start_time']
+        throughput = self.stats['tasks_completed'] / runtime if runtime > 0 else 0
+        
+        print(f"\n📊 WORKER STATS (PID: {self.stats['worker_pid']}):")
+        print(f"   Runtime: {runtime:.1f}s")
+        print(f"   Received: {self.stats['tasks_received']}")
+        print(f"   Completed: {self.stats['tasks_completed']}")
+        print(f"   Failed: {self.stats['tasks_failed']}")
+        print(f"   Batches: {self.stats['batches_processed']}")
+        print(f"   Throughput: {throughput:.2f} tasks/sec")
+        print(f"   Pool size: {self.worker_pool_size}")
+    
+    def run(self):
+        """Main worker loop."""
+        try:
+            # Connect to RabbitMQ
+            self.connection = pika.BlockingConnection(
+                pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT)
+            )
+            self.channel = self.connection.channel()
+            
+            # Declare queue
+            self.channel.queue_declare(queue=QUEUE_TASK, durable=True)
+            self.channel.basic_qos(prefetch_count=self.batch_size * 2)  # Prefetch for batching
+            
+            # Start multiprocessing pool
+            self.start_worker_pool()
+            
+            # Start batch processor thread
+            self.batch_processor_thread = threading.Thread(target=self.batch_processor, daemon=True)
+            self.batch_processor_thread.start()
+            
+            # Set up RabbitMQ consumer
+            self.channel.basic_consume(queue=QUEUE_TASK, on_message_callback=self.message_callback)
+            
+            print(f"🚀 Multiprocessing Consumer Worker started!")
+            print(f"   Pool size: {self.worker_pool_size}")
+            print(f"   Batch size: {self.batch_size}")
+            print(f"   Batch timeout: {self.batch_timeout}s")
+            print(f"   Worker PID: {os.getpid()}")
+            print("   Waiting for tasks... (Ctrl+C to stop)")
+            
+            # Start consuming - print stats every 30 seconds
+            last_stats_time = time.time()
+            
+            while True:
+                self.connection.process_data_events(time_limit=1)
+                
+                if time.time() - last_stats_time >= 30:
+                    self.print_stats()
+                    last_stats_time = time.time()
+                    
+        except KeyboardInterrupt:
+            print("\n⏹️  Shutting down worker...")
+        except Exception as e:
+            print(f"❌ Worker error: {e}")
+        finally:
+            self.shutdown()
+    
+    def shutdown(self):
+        """Clean shutdown of worker."""
+        print("🔄 Shutting down multiprocessing consumer worker...")
+        
+        # Stop batch processor
+        self.shutdown_event.set()
+        if self.batch_processor_thread:
+            self.batch_processor_thread.join(timeout=5)
+        
+        # Stop worker pool
+        self.stop_worker_pool()
+        
+        # Close RabbitMQ connection
+        try:
+            if self.channel:
+                self.channel.stop_consuming()
+            if self.connection:
+                self.connection.close()
+        except:
+            pass
+        
+        # Final stats
+        self.print_stats()
+        print("✅ Worker shutdown complete")
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Multiprocessing RabbitMQ Consumer Worker')
+    parser.add_argument('--pool-size', type=int, default=4, help='Multiprocessing pool size')
+    parser.add_argument('--batch-size', type=int, default=5, help='Batch size for processing')
+    parser.add_argument('--batch-timeout', type=float, default=2.0, help='Batch timeout in seconds')
+    
+    args = parser.parse_args()
+    
+    worker = MultiprocessingConsumerWorker(
+        worker_pool_size=args.pool_size,
+        batch_size=args.batch_size,
+        batch_timeout=args.batch_timeout
+    )
+    
+    worker.run()
