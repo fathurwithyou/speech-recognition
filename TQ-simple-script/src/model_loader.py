@@ -4,6 +4,7 @@ import threading
 import logging
 from typing import Dict, Any
 
+from sklearn import base
 import torch
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,6 @@ def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: boo
             engine = "torchao.dynamic"
         return m, engine
     except Exception:
-        # Fallback to torch.ao dynamic quantization
         try:
             from torch.ao.quantization import quantize_dynamic
             m = copy.deepcopy(model_fp32) if copy_model else model_fp32
@@ -46,36 +46,6 @@ def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: boo
             return m, "torch.ao.dynamic"
         except Exception:
             return model_fp32, "none"
-
-
-def _load_state_dict_safe(path: str):
-    """Load a state dict compatible with PyTorch 2.6+ safety defaults.
-
-    Tries weights_only=True with allowlisted torchao tensor class; falls back to
-    weights_only=False if needed. Use only with trusted checkpoints.
-    """
-    # First try safe loading with allowlist if available
-    try:
-        from torch.serialization import safe_globals
-        try:
-            from torchao.quantization.linear_activation_quantized_tensor import (
-                LinearActivationQuantizedTensor,
-            )
-            allow = [LinearActivationQuantizedTensor]
-        except Exception:
-            allow = []
-        with safe_globals(allow):
-            return torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        # Older torch without weights_only
-        return torch.load(path, map_location="cpu")
-    except Exception:
-        # As last resort, allow full unpickling (trusted source only)
-        try:
-            return torch.load(path, map_location="cpu", weights_only=False)
-        except TypeError:
-            return torch.load(path, map_location="cpu")
-
 
 class WhisperModelLoader:
     """Simple loader/runner for OpenAI Whisper.
@@ -85,7 +55,7 @@ class WhisperModelLoader:
     reliable working path over quantization complexity.
     """
 
-    def __init__(self, base_model: str = "small", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
+    def __init__(self, base_model: str = "large-v2", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
         self.base_model = base_model
         self.model_path = model_path
         self.quant_mode = quant_mode
@@ -94,11 +64,6 @@ class WhisperModelLoader:
         self.model_info: Dict[str, Any] = {}
         self.load_lock = threading.Lock()
         self.is_loaded = False
-
-    def detect_device(self) -> str:
-        if torch.cuda.is_available():
-            return "cuda"
-        return "cpu"
 
     def load_model(self, force_reload: bool = False) -> bool:
         with self.load_lock:
@@ -111,29 +76,20 @@ class WhisperModelLoader:
 
             try:
                 load_start = time.time()
-                self.device = self.detect_device()
-                # If an INT8 state dict exists, try loading it
+                self.device = "cpu"
                 if self.model_path and os.path.exists(self.model_path):
                     print(f"Loading Whisper '{self.base_model}' (INT8 weights) on {self.device}...")
-                    # Build architecture: get dims from a base model on CPU
                     base_arch = whisper.load_model(self.base_model, device="cpu")
-                    dims = getattr(base_arch, 'dims', None)
-                    del base_arch
-                    if dims is None:
-                        raise RuntimeError("Could not determine Whisper architecture dims")
+                    dims = base_arch.dims
+                    del base_arch   
 
-                    # Create blank model with same architecture and apply quantization
                     core = WhisperCore(dims)
                     core, q_engine = quantize_model_int8(core, quant_mode=self.quant_mode, copy_model=False)
-
-                    # Load INT8 state dict (weights_only with allowlist when available)
-                    state = _load_state_dict_safe(self.model_path)
+                    state = torch.load(self.model_path, map_location="cpu", weights_only=False)
                     missing, unexpected = core.load_state_dict(state, strict=False)
-                    if missing or unexpected:
-                        # Not fatal; continue
-                        pass
                     self.model = core.to(self.device)
-                    self.model.eval()
+                    if missing or unexpected:
+                        print(f"Warning: state dict load had {len(missing)} missing and {len(unexpected)} unexpected keys")
 
                     self.model_info = {
                         'device': self.device,
@@ -163,6 +119,7 @@ class WhisperModelLoader:
                 return True
 
             except Exception as e:
+                e = str(e)[:500]  # Truncate long errors
                 print(f"Failed to load Whisper model: {e}")
                 logger.error(f"Model loading error: {e}")
                 self.is_loaded = False
@@ -177,7 +134,7 @@ class WhisperModelLoader:
             }
 
         try:
-            t0 = time.time()
+            t0 = time.perf_counter()
             with torch.no_grad():
                 result = self.model.transcribe(
                     audio_path,
@@ -189,7 +146,7 @@ class WhisperModelLoader:
                 )
 
             text = (result.get("text") or "").strip()
-            inference_time = time.time() - t0
+            inference_time = time.perf_counter() - t0
 
             return {
                 'transcription': text,
@@ -240,7 +197,6 @@ def load_model_if_needed(process_id: int = 0) -> bool:
     if not loader.is_loaded:
         return loader.load_model()
     return True
-
 
 def load_all_models(num_processes: int = 4) -> bool:
     ok = 0
