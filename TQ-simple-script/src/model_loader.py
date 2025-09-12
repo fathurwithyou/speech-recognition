@@ -13,7 +13,7 @@ try:
     from whisper.model import Whisper as WhisperCore
     WHISPER_AVAILABLE = True
 except ImportError:
-    WHISPER_AVAILABLE = False
+WHISPER_AVAILABLE = False
     print("OpenAI Whisper not available. Install with: pip install openai-whisper")
 
 
@@ -46,6 +46,35 @@ def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: boo
             return m, "torch.ao.dynamic"
         except Exception:
             return model_fp32, "none"
+
+
+def _load_state_dict_safe(path: str):
+    """Load a state dict compatible with PyTorch 2.6+ safety defaults.
+
+    Tries weights_only=True with allowlisted torchao tensor class; falls back to
+    weights_only=False if needed. Use only with trusted checkpoints.
+    """
+    # First try safe loading with allowlist if available
+    try:
+        from torch.serialization import safe_globals
+        try:
+            from torchao.quantization.linear_activation_quantized_tensor import (
+                LinearActivationQuantizedTensor,
+            )
+            allow = [LinearActivationQuantizedTensor]
+        except Exception:
+            allow = []
+        with safe_globals(allow):
+            return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        # Older torch without weights_only
+        return torch.load(path, map_location="cpu")
+    except Exception:
+        # As last resort, allow full unpickling (trusted source only)
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
 
 
 class WhisperModelLoader:
