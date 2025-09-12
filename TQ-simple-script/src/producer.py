@@ -148,8 +148,14 @@ async def main():
 
     handler_with_rabbitmq = partial(connection_manager, rabbitmq_channel=channel)
 
-    async with websockets.serve(handler_with_rabbitmq, "localhost", 8765) as server:
-        print("WebSocket server started on ws://localhost:8765")
+    async with websockets.serve(
+        handler_with_rabbitmq, 
+        "localhost", 
+        8765,
+        max_size=10*1024*1024,  # 10MB limit
+        max_queue=None
+    ) as server:
+        print("WebSocket server started on ws://localhost:8765 (max message size: 10MB)")
         await asyncio.Future() 
 
 
