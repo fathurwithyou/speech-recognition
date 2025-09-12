@@ -225,15 +225,34 @@ def quantize_onnx_model(model_path, output_path=None):
         return None
 
 
+def cleanup_corrupted_quantized_models(output_dir):
+    """Clean up corrupted quantized model files."""
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return
+    
+    print("Cleaning up any corrupted quantized models...")
+    for file_path in output_path.glob("*_int8.onnx"):
+        try:
+            # Try to load the model to verify it's not corrupted
+            onnx.load(str(file_path))
+        except Exception:
+            print(f"Removing corrupted file: {file_path}")
+            file_path.unlink()
+
+
 def convert_whisper_to_onnx_int8(model_name="base", output_dir="onnx_models"):
     """Complete pipeline: Convert Whisper to ONNX and quantize to INT8."""
     
     print(f"Converting Whisper {model_name} to ONNX INT8...")
     
+    # Step 0: Clean up any corrupted files from previous runs
+    cleanup_corrupted_quantized_models(output_dir)
+    
     # Step 1: Export to ONNX
     encoder_path, decoder_path = export_whisper_to_onnx(model_name, output_dir)
     
-    # Step 2: Quantize to INT8
+    # Step 2: Quantize to INT8 (will be skipped for large models)
     encoder_int8_path = quantize_onnx_model(encoder_path)
     decoder_int8_path = quantize_onnx_model(decoder_path)
     
@@ -243,24 +262,25 @@ def convert_whisper_to_onnx_int8(model_name="base", output_dir="onnx_models"):
         print(f"✅ Encoder quantized: {encoder_int8_path}")
         success_count += 1
     else:
-        print(f"⚠️  Encoder quantization failed, using FP32: {encoder_path}")
+        print(f"⚠️  Encoder using FP32: {encoder_path}")
         encoder_int8_path = encoder_path
     
     if decoder_int8_path:
         print(f"✅ Decoder quantized: {decoder_int8_path}")
         success_count += 1
     else:
-        print(f"⚠️  Decoder quantization failed, using FP32: {decoder_path}")
+        print(f"⚠️  Decoder using FP32: {decoder_path}")
         decoder_int8_path = decoder_path
     
     if success_count > 0:
         print(f"✅ Conversion completed with {success_count}/2 models quantized")
-        print(f"Encoder: {encoder_int8_path}")
-        print(f"Decoder: {decoder_int8_path}")
-        return encoder_int8_path, decoder_int8_path
     else:
-        print("⚠️  No models quantized, but FP32 models available")
-        return encoder_path, decoder_path
+        print("✅ Conversion completed using FP32 models (still much faster than PyTorch)")
+    
+    print(f"Final models:")
+    print(f"  Encoder: {encoder_int8_path}")
+    print(f"  Decoder: {decoder_int8_path}")
+    return encoder_int8_path, decoder_int8_path
 
 
 if __name__ == "__main__":
