@@ -126,11 +126,8 @@ class WhisperModelLoader:
                     core = WhisperCore(dims)
                     core, q_engine = quantize_model_int8(core, quant_mode=self.quant_mode, copy_model=False)
 
-                    # Load state dict
-                    try:
-                        state = torch.load(self.model_path, map_location="cpu")
-                    except TypeError:
-                        state = torch.load(self.model_path, map_location="cpu")
+                    # Load INT8 state dict (weights_only with allowlist when available)
+                    state = _load_state_dict_safe(self.model_path)
                     missing, unexpected = core.load_state_dict(state, strict=False)
                     if missing or unexpected:
                         # Not fatal; continue
@@ -252,4 +249,3 @@ def load_all_models(num_processes: int = 4) -> bool:
             ok += 1
     print(f"Loaded {ok}/{num_processes} model instances")
     return ok > 0
-
