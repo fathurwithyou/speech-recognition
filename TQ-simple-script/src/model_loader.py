@@ -339,7 +339,10 @@ class WhisperONNXModelLoader:
             
             # Decode tokens to text (simplified)
             if WHISPER_AVAILABLE:
-                text = whisper.tokenizer.get_tokenizer().decode(tokens[1:])  # Skip start token
+                # Determine if model is multilingual based on model name
+                multilingual = not self.model_name.endswith('.en')
+                tokenizer = whisper.tokenizer.get_tokenizer(multilingual=multilingual)
+                text = tokenizer.decode(tokens[1:])  # Skip start token
             else:
                 text = f"ONNX_TRANSCRIPTION_FILE_{file_id}"  # Fallback text
             
