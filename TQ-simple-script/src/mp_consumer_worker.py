@@ -8,7 +8,7 @@ import threading
 from audio_utils import get_timit_file_path, model_based_speech_to_text
 
 # Pool initializer: load model once per worker process and set thread counts
-def _pool_init(threads_per_model: int):
+def _pool_init(threads_per_model: int, use_onnx: bool = False):
     try:
         import os as _os
         _os.environ["OMP_NUM_THREADS"] = str(threads_per_model)
@@ -27,7 +27,7 @@ def _pool_init(threads_per_model: int):
 
     try:
         from model_loader import load_model_if_needed
-        load_model_if_needed(0)
+        load_model_if_needed(0, use_onnx=use_onnx)
     except Exception:
         pass
 
@@ -35,7 +35,7 @@ def _pool_init(threads_per_model: int):
 def process_single_task_worker(task_data):
     """Process a single speech recognition task (standalone function for multiprocessing)."""
     # Extract only the serializable data
-    task_dict, task_id, file_id, temp_path, start_time, process_id = task_data
+    task_dict, task_id, file_id, temp_path, start_time, process_id, use_onnx = task_data
     
     try:
         # Use temp_path if provided, otherwise use TIMIT directory
@@ -55,7 +55,7 @@ def process_single_task_worker(task_data):
             }
         
         # Generate transcription using Whisper model with specific process ID
-        transcription_result = model_based_speech_to_text(file_path, file_id, use_model=True, process_id=process_id)
+        transcription_result = model_based_speech_to_text(file_path, file_id, use_model=True, process_id=process_id, use_onnx=use_onnx)
         
         # Basic metadata without extra feature extraction
         actual_inference_time = transcription_result.get('inference_time', 0.0)
@@ -111,11 +111,12 @@ QUEUE_TASK = 'audio_processing_queue'
 class MultiprocessingConsumerWorker:
     """RabbitMQ consumer with multiprocessing pool for concurrent task processing."""
     
-    def __init__(self, worker_pool_size=4, batch_size=5, batch_timeout=2.0, threads_per_model: int = 4):
+    def __init__(self, worker_pool_size=4, batch_size=5, batch_timeout=2.0, threads_per_model: int = 4, use_onnx: bool = False):
         self.worker_pool_size = worker_pool_size
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
         self.threads_per_model = int(threads_per_model)
+        self.use_onnx = use_onnx
         
         self.connection = None
         self.channel = None
@@ -143,9 +144,10 @@ class MultiprocessingConsumerWorker:
         self.pool = mp.Pool(
             processes=self.worker_pool_size,
             initializer=_pool_init,
-            initargs=(self.threads_per_model,)
+            initargs=(self.threads_per_model, self.use_onnx)
         )
-        print(f"Started multiprocessing pool with {self.worker_pool_size} workers")
+        model_type = "ONNX INT8" if self.use_onnx else "PyTorch"
+        print(f"Started multiprocessing pool with {self.worker_pool_size} workers using {model_type}")
         print("Each worker process will load its model once")
         
     def stop_worker_pool(self):
@@ -219,7 +221,7 @@ class MultiprocessingConsumerWorker:
             # Use a fixed process_id per worker (0) so each worker keeps one model
             file_id = task.get('file_id')
             temp_path = task.get('temp_path')
-            serializable_data = (task_dict, task['task_id'], file_id, temp_path, start_time, 0)
+            serializable_data = (task_dict, task['task_id'], file_id, temp_path, start_time, 0, self.use_onnx)
             mp_task_data.append(serializable_data)
             
             # Store metadata we need for result handling
@@ -467,6 +469,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=5, help='Batch size for processing')
     parser.add_argument('--batch-timeout', type=float, default=2.0, help='Batch timeout in seconds')
     parser.add_argument('--threads-per-model', type=int, default=4, help='CPU threads used by each model/worker')
+    parser.add_argument('--use-onnx', action='store_true', help='Use ONNX INT8 models instead of PyTorch')
     
     args = parser.parse_args()
     
@@ -474,7 +477,8 @@ if __name__ == "__main__":
         worker_pool_size=args.pool_size,
         batch_size=args.batch_size,
         batch_timeout=args.batch_timeout,
-        threads_per_model=args.threads_per_model
+        threads_per_model=args.threads_per_model,
+        use_onnx=args.use_onnx
     )
     
     worker.run()

@@ -3,6 +3,7 @@ import time
 import threading
 import logging
 from typing import Dict, Any
+import numpy as np
 
 from sklearn import base
 import torch
@@ -16,6 +17,13 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
     print("OpenAI Whisper not available. Install with: pip install openai-whisper")
+
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    print("ONNX Runtime not available. Install with: pip install onnxruntime")
 
 
 def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: bool = True):
@@ -182,26 +190,198 @@ class WhisperModelLoader:
             return 0.5
 
 
+class WhisperONNXModelLoader:
+    """ONNX-based Whisper model loader with INT8 quantization."""
+    
+    def __init__(self, model_name: str = "base", onnx_dir: str = "onnx_models"):
+        self.model_name = model_name
+        self.onnx_dir = onnx_dir
+        self.encoder_session = None
+        self.decoder_session = None
+        self.model_info: Dict[str, Any] = {}
+        self.load_lock = threading.Lock()
+        self.is_loaded = False
+        
+        # Get model dimensions from whisper
+        if WHISPER_AVAILABLE:
+            temp_model = whisper.load_model(model_name)
+            self.dims = temp_model.dims
+            del temp_model
+        else:
+            # Default dimensions for base model
+            self.dims = type('Dims', (), {
+                'n_mels': 80,
+                'n_audio_ctx': 1500,
+                'n_audio_state': 512,
+                'n_audio_head': 8,
+                'n_audio_layer': 6,
+                'n_vocab': 51865,
+                'n_text_ctx': 448,
+                'n_text_state': 512,
+                'n_text_head': 8,
+                'n_text_layer': 6
+            })()
+    
+    def load_model(self, force_reload: bool = False) -> bool:
+        """Load ONNX models."""
+        with self.load_lock:
+            if self.is_loaded and not force_reload:
+                return True
+            
+            if not ONNX_AVAILABLE:
+                print("ONNX Runtime not available")
+                return False
+            
+            try:
+                load_start = time.time()
+                
+                # Paths to ONNX models
+                encoder_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_encoder_int8.onnx")
+                decoder_path = os.path.join(self.onnx_dir, f"whisper_{self.model_name}_decoder_int8.onnx")
+                
+                if not os.path.exists(encoder_path) or not os.path.exists(decoder_path):
+                    print(f"ONNX models not found. Expected:")
+                    print(f"  {encoder_path}")
+                    print(f"  {decoder_path}")
+                    print("Run convert_to_onnx.py to generate them.")
+                    return False
+                
+                print(f"Loading ONNX Whisper {self.model_name} models...")
+                
+                # Create ONNX Runtime sessions
+                sess_options = ort.SessionOptions()
+                sess_options.inter_op_num_threads = 1
+                sess_options.intra_op_num_threads = 4
+                
+                self.encoder_session = ort.InferenceSession(encoder_path, sess_options)
+                self.decoder_session = ort.InferenceSession(decoder_path, sess_options)
+                
+                self.model_info = {
+                    'load_time': time.time() - load_start,
+                    'model_type': 'Whisper ONNX INT8',
+                    'model_name': self.model_name,
+                    'encoder_path': encoder_path,
+                    'decoder_path': decoder_path,
+                    'onnx_version': ort.__version__
+                }
+                
+                self.is_loaded = True
+                print(f"ONNX Whisper models loaded in {self.model_info['load_time']:.2f}s")
+                return True
+                
+            except Exception as e:
+                print(f"Failed to load ONNX models: {e}")
+                self.is_loaded = False
+                return False
+    
+    def infer_audio(self, audio_path: str, file_id: str, language: str = "en") -> Dict[str, Any]:
+        """Perform inference using ONNX models."""
+        if not self.is_loaded:
+            return {
+                'transcription': f'ERROR: ONNX model not loaded for {file_id}',
+                'confidence': 0.0,
+                'model_used': 'none'
+            }
+        
+        try:
+            t0 = time.perf_counter()
+            
+            # Load and preprocess audio
+            if WHISPER_AVAILABLE:
+                audio = whisper.load_audio(audio_path)
+                audio = whisper.pad_or_trim(audio)
+                mel = whisper.log_mel_spectrogram(audio, n_mels=self.dims.n_mels).unsqueeze(0).numpy()
+            else:
+                # Fallback - create dummy mel spectrogram
+                mel = np.random.randn(1, self.dims.n_mels, 3000).astype(np.float32)
+            
+            # Run encoder
+            encoder_outputs = self.encoder_session.run(
+                None, 
+                {"mel_spectrogram": mel}
+            )
+            encoder_output = encoder_outputs[0]
+            
+            # Simple greedy decoding
+            tokens = [50258]  # Start token
+            max_tokens = 448
+            
+            for _ in range(max_tokens):
+                token_input = np.array([tokens], dtype=np.int64)
+                
+                decoder_outputs = self.decoder_session.run(
+                    None,
+                    {
+                        "tokens": token_input,
+                        "encoder_output": encoder_output
+                    }
+                )
+                
+                logits = decoder_outputs[0]
+                next_token = np.argmax(logits[0, -1])
+                
+                if next_token == 50257:  # End token
+                    break
+                    
+                tokens.append(int(next_token))
+            
+            # Decode tokens to text (simplified)
+            if WHISPER_AVAILABLE:
+                text = whisper.tokenizer.get_tokenizer().decode(tokens[1:])  # Skip start token
+            else:
+                text = f"ONNX_TRANSCRIPTION_FILE_{file_id}"  # Fallback text
+            
+            inference_time = time.perf_counter() - t0
+            
+            return {
+                'transcription': text.strip(),
+                'confidence': 0.8,  # Default confidence
+                'model_used': f'whisper_{self.model_name}_onnx_int8',
+                'inference_time': inference_time,
+                'language': language,
+                'segments': 1
+            }
+            
+        except Exception as e:
+            print(f"ONNX inference error for {file_id}: {e}")
+            return {
+                'transcription': f'ONNX_ERROR: {str(e)[:80]}',
+                'confidence': 0.0,
+                'model_used': 'error',
+                'inference_time': 0.0
+            }
+
+
 _model_loaders: Dict[int, WhisperModelLoader] = {}
+_onnx_model_loaders: Dict[int, WhisperONNXModelLoader] = {}
 
-def get_model_loader(process_id: int = 0) -> WhisperModelLoader:
-    if process_id not in _model_loaders:
-        _model_loaders[process_id] = WhisperModelLoader()
-    return _model_loaders[process_id]
+def get_model_loader(process_id: int = 0, use_onnx: bool = False):
+    if use_onnx:
+        return get_onnx_model_loader(process_id)
+    else:
+        if process_id not in _model_loaders:
+            _model_loaders[process_id] = WhisperModelLoader()
+        return _model_loaders[process_id]
 
-def get_multiprocess_loaders(num_processes: int = 4) -> Dict[int, WhisperModelLoader]:
-    return {i: get_model_loader(i) for i in range(num_processes)}
+def get_onnx_model_loader(process_id: int = 0) -> WhisperONNXModelLoader:
+    if process_id not in _onnx_model_loaders:
+        _onnx_model_loaders[process_id] = WhisperONNXModelLoader()
+    return _onnx_model_loaders[process_id]
 
-def load_model_if_needed(process_id: int = 0) -> bool:
-    loader = get_model_loader(process_id)
+def get_multiprocess_loaders(num_processes: int = 4, use_onnx: bool = False):
+    return {i: get_model_loader(i, use_onnx) for i in range(num_processes)}
+
+def load_model_if_needed(process_id: int = 0, use_onnx: bool = False) -> bool:
+    loader = get_model_loader(process_id, use_onnx)
     if not loader.is_loaded:
         return loader.load_model()
     return True
 
-def load_all_models(num_processes: int = 4) -> bool:
+def load_all_models(num_processes: int = 4, use_onnx: bool = False) -> bool:
     ok = 0
     for i in range(num_processes):
-        if load_model_if_needed(i):
+        if load_model_if_needed(i, use_onnx):
             ok += 1
-    print(f"Loaded {ok}/{num_processes} model instances")
+    model_type = "ONNX" if use_onnx else "PyTorch"
+    print(f"Loaded {ok}/{num_processes} {model_type} model instances")
     return ok > 0
