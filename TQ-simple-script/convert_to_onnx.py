@@ -176,12 +176,22 @@ def quantize_onnx_model(model_path, output_path=None):
     print(f"Quantizing {model_path} to INT8...")
     
     try:
-        quantize_dynamic(
-            model_input=str(model_path),
-            model_output=str(output_path),
-            weight_type=QuantType.QInt8,
-            optimize_model=True
-        )
+        # Try with optimize_model first (newer versions)
+        try:
+            quantize_dynamic(
+                model_input=str(model_path),
+                model_output=str(output_path),
+                weight_type=QuantType.QInt8,
+                optimize_model=True
+            )
+        except TypeError:
+            # Fallback for older versions without optimize_model parameter
+            quantize_dynamic(
+                model_input=str(model_path),
+                model_output=str(output_path),
+                weight_type=QuantType.QInt8
+            )
+        
         print(f"Quantized model saved to {output_path}")
         return output_path
     except Exception as e:
