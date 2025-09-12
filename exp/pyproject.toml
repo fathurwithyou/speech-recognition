@@ -1,0 +1,24 @@
+[project]
+name = "exp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "datasets[torch]==3.6.0",
+    "faster-whisper>=1.2.0",
+    "ffmpeg>=1.4",
+    "librosa>=0.11.0",
+    "openai-whisper>=20250625",
+    "pandas>=2.3.2",
+    "pip==23.0.1",
+    "setuptools==65.5.0",
+    "soundfile>=0.13.1",
+    "torch>=2.8.0",
+    "torchcodec>=0.7.0",
+    "torchvision>=0.23.0",
+    "transformers>=4.56.0",
+    "whisper>=1.1.10",
+    "whisper-ctranslate2>=0.5.4",
+    "whisperx>=3.4.2",
+]
