@@ -7,14 +7,19 @@ from queue import Queue, Empty
 import threading
 from audio_utils import get_timit_file_path, model_based_speech_to_text
 
-# Pool initializer: load model once per worker process (Windows-safe)
-THREADS_COUNT = 8 
-def _pool_init():
+# Pool initializer: load model once per worker process and set thread counts
+def _pool_init(threads_per_model: int):
+    try:
+        import os as _os
+        _os.environ["OMP_NUM_THREADS"] = str(threads_per_model)
+        _os.environ["MKL_NUM_THREADS"] = str(threads_per_model)
+    except Exception:
+        pass
     try:
         import torch as _torch
         try:
-            _torch.set_num_threads(THREADS_COUNT)
-            _torch.set_num_interop_threads(THREADS_COUNT)
+            _torch.set_num_threads(int(threads_per_model))
+            _torch.set_num_interop_threads(int(threads_per_model))
         except Exception:
             pass
     except Exception:
@@ -88,10 +93,11 @@ QUEUE_TASK = 'audio_processing_queue'
 class MultiprocessingConsumerWorker:
     """RabbitMQ consumer with multiprocessing pool for concurrent task processing."""
     
-    def __init__(self, worker_pool_size=4, batch_size=5, batch_timeout=2.0):
+    def __init__(self, worker_pool_size=4, batch_size=5, batch_timeout=2.0, threads_per_model: int = 4):
         self.worker_pool_size = worker_pool_size
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
+        self.threads_per_model = int(threads_per_model)
         
         self.connection = None
         self.channel = None
@@ -116,7 +122,11 @@ class MultiprocessingConsumerWorker:
     def start_worker_pool(self):
         """Start multiprocessing pool and initialize Whisper models."""
         # Create the pool; each worker loads its model once in initializer
-        self.pool = mp.Pool(processes=self.worker_pool_size, initializer=_pool_init)
+        self.pool = mp.Pool(
+            processes=self.worker_pool_size,
+            initializer=_pool_init,
+            initargs=(self.threads_per_model,)
+        )
         print(f"Started multiprocessing pool with {self.worker_pool_size} workers")
         print("Each worker process will load its model once")
         
@@ -435,13 +445,15 @@ if __name__ == "__main__":
     parser.add_argument('--pool-size', type=int, default=4, help='Multiprocessing pool size')
     parser.add_argument('--batch-size', type=int, default=5, help='Batch size for processing')
     parser.add_argument('--batch-timeout', type=float, default=2.0, help='Batch timeout in seconds')
+    parser.add_argument('--threads-per-model', type=int, default=4, help='CPU threads used by each model/worker')
     
     args = parser.parse_args()
     
     worker = MultiprocessingConsumerWorker(
         worker_pool_size=args.pool_size,
         batch_size=args.batch_size,
-        batch_timeout=args.batch_timeout
+        batch_timeout=args.batch_timeout,
+        threads_per_model=args.threads_per_model
     )
     
     worker.run()
