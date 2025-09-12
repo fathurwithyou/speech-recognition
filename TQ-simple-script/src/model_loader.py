@@ -13,7 +13,7 @@ try:
     from whisper.model import Whisper as WhisperCore
     WHISPER_AVAILABLE = True
 except ImportError:
-WHISPER_AVAILABLE = False
+    WHISPER_AVAILABLE = False
     print("OpenAI Whisper not available. Install with: pip install openai-whisper")
 
 
