@@ -4,6 +4,28 @@ import websockets
 import json
 import random
 import time
+import wave
+
+def get_wav_metadata(wav_path):
+    """Extract metadata from WAV file."""
+    try:
+        with wave.open(wav_path, 'rb') as wav_file:
+            frames = wav_file.getnframes()
+            sample_rate = wav_file.getframerate()
+            duration = frames / float(sample_rate)
+
+            # Get file size
+            file_size = os.path.getsize(wav_path)
+
+            return {
+                'duration': duration,
+                'sample_rate': sample_rate,
+                'file_size': file_size,
+                'frames': frames
+            }
+    except Exception as e:
+        print(f"Error reading WAV metadata from {wav_path}: {e}")
+        return None
 
 async def test_speech_recognition():
     """Test speech recognition with TIMIT audio files."""
@@ -16,9 +38,10 @@ async def test_speech_recognition():
     total_tasks = len(test_files)
     start_time = time.perf_counter()
 
-    # Timing data collection for benchmarking
-    processing_times = []
-    total_times = []
+    # Audio metadata collection for benchmarking
+    audio_durations = []
+    audio_file_sizes = []
+    audio_sample_rates = []
 
     try:
         async with websockets.connect(uri) as websocket:
@@ -29,10 +52,17 @@ async def test_speech_recognition():
             for file_id in test_files:
                 wav_path = f"../timit_eval/{file_id}.wav"
                 if os.path.exists(wav_path):
+                    # Extract WAV metadata for benchmarking
+                    metadata = get_wav_metadata(wav_path)
+                    if metadata:
+                        audio_durations.append(metadata['duration'])
+                        audio_file_sizes.append(metadata['file_size'])
+                        audio_sample_rates.append(metadata['sample_rate'])
+
                     print(f"> Sending WAV file: {file_id}.wav")
                     with open(wav_path, "rb") as f:
                         wav_data = f.read()
-                    
+
                     # Send file metadata and data
                     message = {
                         "file_id": file_id,
@@ -53,25 +83,8 @@ async def test_speech_recognition():
                 result = await websocket.recv()
                 print(f"< Transcription result: {result}")
                 
-                # Try to parse as JSON for better formatting
-                try:
-                    result_data = json.loads(result.split(": ", 1)[1])
-                    if isinstance(result_data, dict) and 'transcription' in result_data:
-                        # Collect timing data for benchmarking
-                        if 'processing_time' in result_data:
-                            processing_times.append(result_data['processing_time'])
-                        if 'inference_time' in result_data:
-                            processing_times.append(result_data['inference_time'])
-
-                        print(f"  File: {result_data['file_id']}.wav")
-                        print(f"  Duration: {result_data['duration_seconds']:.2f}s")
-                        print(f"  Sample Rate: {result_data['sample_rate']} Hz")
-                        print(f"  Features: {result_data['num_features']} frames")
-                        print(f"  Processing Time: {result_data['processing_time']:.2f}s")
-                        print(f"  Transcription: {result_data['transcription']}")
-                        print("-" * 40)
-                except:
-                    pass  # If parsing fails, just show the raw result
+                print(f"  Raw response: {result}")
+                print("-" * 40)
                 
                 results_received += 1
 
@@ -94,20 +107,50 @@ async def test_speech_recognition():
         if total_tasks > 0:
             print(f"Average time per task: {elapsed / total_tasks:.2f} seconds")
 
-        # Audio processing time statistics
-        if processing_times:
+        # Audio metadata statistics
+        if audio_durations:
             import statistics
-            avg_processing = statistics.mean(processing_times)
-            std_processing = statistics.stdev(processing_times) if len(processing_times) > 1 else 0.0
 
-            print(f"\nAUDIO PROCESSING TIME STATISTICS:")
-            print(f"  Sample Count: {len(processing_times)} files")
-            print(f"  Average: {avg_processing:.3f} seconds")
-            print(f"  Std Deviation: {std_processing:.3f} seconds")
-            print(f"  Min Time: {min(processing_times):.3f} seconds")
-            print(f"  Max Time: {max(processing_times):.3f} seconds")
+            # Duration statistics
+            avg_duration = statistics.mean(audio_durations)
+            std_duration = statistics.stdev(audio_durations) if len(audio_durations) > 1 else 0.0
+            total_audio_time = sum(audio_durations)
+
+            # File size statistics
+            avg_file_size = statistics.mean(audio_file_sizes)
+            std_file_size = statistics.stdev(audio_file_sizes) if len(audio_file_sizes) > 1 else 0.0
+            total_file_size = sum(audio_file_sizes)
+
+            # Sample rate statistics
+            unique_sample_rates = list(set(audio_sample_rates))
+
+            print(f"\nAUDIO METADATA STATISTICS:")
+            print(f"  Sample Count: {len(audio_durations)} files")
+            print(f"  Total Audio Time: {total_audio_time:.2f} seconds ({total_audio_time/60:.1f} minutes)")
+            print(f"  Total File Size: {total_file_size/1024:.1f} KB ({total_file_size/(1024*1024):.2f} MB)")
+
+            print(f"\nAUDIO DURATION STATS:")
+            print(f"  Average: {avg_duration:.3f} seconds")
+            print(f"  Std Deviation: {std_duration:.3f} seconds")
+            print(f"  Min Duration: {min(audio_durations):.3f} seconds")
+            print(f"  Max Duration: {max(audio_durations):.3f} seconds")
+
+            print(f"\nFILE SIZE STATS:")
+            print(f"  Average: {avg_file_size/1024:.1f} KB")
+            print(f"  Std Deviation: {std_file_size/1024:.1f} KB")
+            print(f"  Min Size: {min(audio_file_sizes)/1024:.1f} KB")
+            print(f"  Max Size: {max(audio_file_sizes)/1024:.1f} KB")
+
+            print(f"\nSAMPLE RATE INFO:")
+            print(f"  Sample Rates Found: {unique_sample_rates} Hz")
+
+            # Processing rate calculation
+            processing_rate = total_audio_time / elapsed if elapsed > 0 else 0
+            print(f"\nPROCESSING EFFICIENCY:")
+            print(f"  Audio-to-Processing Ratio: {processing_rate:.2f}x")
+            print(f"  (1.0x = real-time, >1.0x = faster than real-time)")
         else:
-            print("\nNo processing time data collected")
+            print("\nNo audio metadata collected")
 
 async def batch_transcription_test():
     """Test batch transcription of multiple random TIMIT files."""
@@ -120,8 +163,10 @@ async def batch_transcription_test():
     print(f"Testing batch transcription of {num_files} random TIMIT files:")
     print(f"Files: {', '.join(f'{f}.wav' for f in random_files)}")
 
-    # Timing data collection for benchmarking
-    processing_times = []
+    # Audio metadata collection for benchmarking
+    audio_durations = []
+    audio_file_sizes = []
+    audio_sample_rates = []
     batch_start_time = time.perf_counter()
     
     try:
@@ -132,9 +177,16 @@ async def batch_transcription_test():
             for file_id in random_files:
                 wav_path = f"../timit_eval/{file_id}.wav"
                 if os.path.exists(wav_path):
+                    # Extract WAV metadata for benchmarking
+                    metadata = get_wav_metadata(wav_path)
+                    if metadata:
+                        audio_durations.append(metadata['duration'])
+                        audio_file_sizes.append(metadata['file_size'])
+                        audio_sample_rates.append(metadata['sample_rate'])
+
                     with open(wav_path, "rb") as f:
                         wav_data = f.read()
-                    
+
                     message = {
                         "file_id": file_id,
                         "data": wav_data.hex()
@@ -155,14 +207,6 @@ async def batch_transcription_test():
                 results.append(result)
                 print(f"Result {i+1}/{num_files}: {result}")
 
-                # Extract timing data from results
-                try:
-                    result_data = json.loads(result.split(": ", 1)[1])
-                    if isinstance(result_data, dict) and 'processing_time' in result_data:
-                        processing_times.append(result_data['processing_time'])
-                except:
-                    pass
-
             batch_end_time = time.perf_counter()
             batch_elapsed = batch_end_time - batch_start_time
 
@@ -175,17 +219,50 @@ async def batch_transcription_test():
             print(f"Total batch time: {batch_elapsed:.2f} seconds")
             print(f"Average time per file: {batch_elapsed / num_files:.2f} seconds")
 
-            if processing_times:
+            # Audio metadata statistics
+            if audio_durations:
                 import statistics
-                avg_processing = statistics.mean(processing_times)
-                std_processing = statistics.stdev(processing_times) if len(processing_times) > 1 else 0.0
 
-                print(f"\nAUDIO PROCESSING TIME STATISTICS:")
-                print(f"  Sample Count: {len(processing_times)} files")
-                print(f"  Average: {avg_processing:.3f} seconds")
-                print(f"  Std Deviation: {std_processing:.3f} seconds")
-                print(f"  Min Time: {min(processing_times):.3f} seconds")
-                print(f"  Max Time: {max(processing_times):.3f} seconds")
+                # Duration statistics
+                avg_duration = statistics.mean(audio_durations)
+                std_duration = statistics.stdev(audio_durations) if len(audio_durations) > 1 else 0.0
+                total_audio_time = sum(audio_durations)
+
+                # File size statistics
+                avg_file_size = statistics.mean(audio_file_sizes)
+                std_file_size = statistics.stdev(audio_file_sizes) if len(audio_file_sizes) > 1 else 0.0
+                total_file_size = sum(audio_file_sizes)
+
+                # Sample rate statistics
+                unique_sample_rates = list(set(audio_sample_rates))
+
+                print(f"\nAUDIO METADATA STATISTICS:")
+                print(f"  Sample Count: {len(audio_durations)} files")
+                print(f"  Total Audio Time: {total_audio_time:.2f} seconds ({total_audio_time/60:.1f} minutes)")
+                print(f"  Total File Size: {total_file_size/1024:.1f} KB ({total_file_size/(1024*1024):.2f} MB)")
+
+                print(f"\nAUDIO DURATION STATS:")
+                print(f"  Average: {avg_duration:.3f} seconds")
+                print(f"  Std Deviation: {std_duration:.3f} seconds")
+                print(f"  Min Duration: {min(audio_durations):.3f} seconds")
+                print(f"  Max Duration: {max(audio_durations):.3f} seconds")
+
+                print(f"\nFILE SIZE STATS:")
+                print(f"  Average: {avg_file_size/1024:.1f} KB")
+                print(f"  Std Deviation: {std_file_size/1024:.1f} KB")
+                print(f"  Min Size: {min(audio_file_sizes)/1024:.1f} KB")
+                print(f"  Max Size: {max(audio_file_sizes)/1024:.1f} KB")
+
+                print(f"\nSAMPLE RATE INFO:")
+                print(f"  Sample Rates Found: {unique_sample_rates} Hz")
+
+                # Processing rate calculation
+                processing_rate = total_audio_time / batch_elapsed if batch_elapsed > 0 else 0
+                print(f"\nPROCESSING EFFICIENCY:")
+                print(f"  Audio-to-Processing Ratio: {processing_rate:.2f}x")
+                print(f"  (1.0x = real-time, >1.0x = faster than real-time)")
+            else:
+                print("\nNo audio metadata collected")
 
     except Exception as e:
         print(f"Batch test error: {e}")
