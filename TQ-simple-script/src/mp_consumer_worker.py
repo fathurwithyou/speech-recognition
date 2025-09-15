@@ -136,6 +136,12 @@ class MultiprocessingConsumerWorker:
             'start_time': time.time(),
             'worker_pid': os.getpid()
         }
+
+        # Audio timing statistics
+        self.audio_times = {
+            'processing_times': [],
+            'total_times': []
+        }
         
     def start_worker_pool(self):
         """Start multiprocessing pool and initialize Whisper models."""
@@ -289,7 +295,15 @@ class MultiprocessingConsumerWorker:
         """Handle completed task result."""
         task = result['task']
         delivery_tag = result['delivery_tag']
-        
+
+        # Collect timing data for successful tasks
+        if result['success'] and 'result' in result:
+            task_result = result['result']
+            if 'processing_time' in task_result:
+                self.audio_times['processing_times'].append(task_result['processing_time'])
+            if 'total_time' in result:
+                self.audio_times['total_times'].append(result['total_time'])
+
         # All RabbitMQ operations must be performed on the main thread.
         # Queue a single action for the main loop to execute.
         action = {
@@ -356,7 +370,31 @@ class MultiprocessingConsumerWorker:
                 self.channel.basic_nack(delivery_tag=delivery_tag, requeue=requeue)
         except Exception as e:
             print(f"Nack failed: {e}")
-    
+
+    def calculate_audio_stats(self):
+        """Calculate average and standard deviation for audio processing times."""
+        import statistics
+
+        stats = {}
+
+        if self.audio_times['processing_times']:
+            processing_times = self.audio_times['processing_times']
+            stats['processing_avg'] = statistics.mean(processing_times)
+            stats['processing_std'] = statistics.stdev(processing_times) if len(processing_times) > 1 else 0.0
+        else:
+            stats['processing_avg'] = 0.0
+            stats['processing_std'] = 0.0
+
+        if self.audio_times['total_times']:
+            total_times = self.audio_times['total_times']
+            stats['total_avg'] = statistics.mean(total_times)
+            stats['total_std'] = statistics.stdev(total_times) if len(total_times) > 1 else 0.0
+        else:
+            stats['total_avg'] = 0.0
+            stats['total_std'] = 0.0
+
+        return stats
+
     def message_callback(self, ch, method, properties, body):
         """RabbitMQ message callback - adds tasks to processing queue."""
         try:
@@ -375,7 +413,10 @@ class MultiprocessingConsumerWorker:
         """Print current worker statistics."""
         runtime = time.time() - self.stats['start_time']
         throughput = self.stats['tasks_completed'] / runtime if runtime > 0 else 0
-        
+
+        # Calculate audio timing statistics
+        audio_stats = self.calculate_audio_stats()
+
         print(f"\nWORKER STATS (PID: {self.stats['worker_pid']}):")
         print(f"   Runtime: {runtime:.1f}s")
         print(f"   Received: {self.stats['tasks_received']}")
@@ -384,6 +425,13 @@ class MultiprocessingConsumerWorker:
         print(f"   Batches: {self.stats['batches_processed']}")
         print(f"   Throughput: {throughput:.2f} tasks/sec")
         print(f"   Pool size: {self.worker_pool_size}")
+
+        # Audio timing statistics
+        if len(self.audio_times['processing_times']) > 0:
+            print(f"\nAUDIO TIMING STATS:")
+            print(f"   Processing Time - Avg: {audio_stats['processing_avg']:.3f}s ± {audio_stats['processing_std']:.3f}s")
+            print(f"   Total Time - Avg: {audio_stats['total_avg']:.3f}s ± {audio_stats['total_std']:.3f}s")
+            print(f"   Sample Count: {len(self.audio_times['processing_times'])} tasks")
     
     def run(self):
         """Main worker loop."""
