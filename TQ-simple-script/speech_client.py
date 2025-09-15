@@ -8,13 +8,17 @@ import time
 async def test_speech_recognition():
     """Test speech recognition with TIMIT audio files."""
     uri = "ws://localhost:8765"
-    
+
     test_files = os.listdir("../timit_eval")
-    test_files = [f.split(".")[0] for f in test_files if f.endswith(".wav")]    
-    test_files = test_files[:20]  
+    test_files = [f.split(".")[0] for f in test_files if f.endswith(".wav")]
+    test_files = test_files[:20]
     results_received = 0
     total_tasks = len(test_files)
     start_time = time.perf_counter()
+
+    # Timing data collection for benchmarking
+    processing_times = []
+    total_times = []
 
     try:
         async with websockets.connect(uri) as websocket:
@@ -53,6 +57,12 @@ async def test_speech_recognition():
                 try:
                     result_data = json.loads(result.split(": ", 1)[1])
                     if isinstance(result_data, dict) and 'transcription' in result_data:
+                        # Collect timing data for benchmarking
+                        if 'processing_time' in result_data:
+                            processing_times.append(result_data['processing_time'])
+                        if 'inference_time' in result_data:
+                            processing_times.append(result_data['inference_time'])
+
                         print(f"  File: {result_data['file_id']}.wav")
                         print(f"  Duration: {result_data['duration_seconds']:.2f}s")
                         print(f"  Sample Rate: {result_data['sample_rate']} Hz")
@@ -75,20 +85,44 @@ async def test_speech_recognition():
     finally:
         end_time = time.perf_counter()
         elapsed = end_time - start_time
+
+        # Calculate and display benchmark statistics
+        print("\n" + "=" * 60)
+        print("BENCHMARK RESULTS")
+        print("=" * 60)
         print(f"Total time for {total_tasks} tasks: {elapsed:.2f} seconds")
         if total_tasks > 0:
             print(f"Average time per task: {elapsed / total_tasks:.2f} seconds")
 
+        # Audio processing time statistics
+        if processing_times:
+            import statistics
+            avg_processing = statistics.mean(processing_times)
+            std_processing = statistics.stdev(processing_times) if len(processing_times) > 1 else 0.0
+
+            print(f"\nAUDIO PROCESSING TIME STATISTICS:")
+            print(f"  Sample Count: {len(processing_times)} files")
+            print(f"  Average: {avg_processing:.3f} seconds")
+            print(f"  Std Deviation: {std_processing:.3f} seconds")
+            print(f"  Min Time: {min(processing_times):.3f} seconds")
+            print(f"  Max Time: {max(processing_times):.3f} seconds")
+        else:
+            print("\nNo processing time data collected")
+
 async def batch_transcription_test():
     """Test batch transcription of multiple random TIMIT files."""
     uri = "ws://localhost:8765"
-    
+
     # Test with random files from the TIMIT dataset (0-199)
     num_files = 10
     random_files = [str(random.randint(0, 199)) for _ in range(num_files)]
-    
+
     print(f"Testing batch transcription of {num_files} random TIMIT files:")
     print(f"Files: {', '.join(f'{f}.wav' for f in random_files)}")
+
+    # Timing data collection for benchmarking
+    processing_times = []
+    batch_start_time = time.perf_counter()
     
     try:
         async with websockets.connect(uri) as websocket:
@@ -120,9 +154,39 @@ async def batch_transcription_test():
                 result = await websocket.recv()
                 results.append(result)
                 print(f"Result {i+1}/{num_files}: {result}")
-            
+
+                # Extract timing data from results
+                try:
+                    result_data = json.loads(result.split(": ", 1)[1])
+                    if isinstance(result_data, dict) and 'processing_time' in result_data:
+                        processing_times.append(result_data['processing_time'])
+                except:
+                    pass
+
+            batch_end_time = time.perf_counter()
+            batch_elapsed = batch_end_time - batch_start_time
+
             print(f"\nBatch transcription of {num_files} files completed!")
-            
+
+            # Display batch benchmark results
+            print("\n" + "=" * 60)
+            print("BATCH BENCHMARK RESULTS")
+            print("=" * 60)
+            print(f"Total batch time: {batch_elapsed:.2f} seconds")
+            print(f"Average time per file: {batch_elapsed / num_files:.2f} seconds")
+
+            if processing_times:
+                import statistics
+                avg_processing = statistics.mean(processing_times)
+                std_processing = statistics.stdev(processing_times) if len(processing_times) > 1 else 0.0
+
+                print(f"\nAUDIO PROCESSING TIME STATISTICS:")
+                print(f"  Sample Count: {len(processing_times)} files")
+                print(f"  Average: {avg_processing:.3f} seconds")
+                print(f"  Std Deviation: {std_processing:.3f} seconds")
+                print(f"  Min Time: {min(processing_times):.3f} seconds")
+                print(f"  Max Time: {max(processing_times):.3f} seconds")
+
     except Exception as e:
         print(f"Batch test error: {e}")
 
