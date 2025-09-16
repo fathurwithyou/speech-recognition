@@ -55,7 +55,7 @@ class WhisperModelLoader:
     reliable working path over quantization complexity.
     """
 
-    def __init__(self, base_model: str = "large-v2", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
+    def __init__(self, base_model: str = "medium", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
         self.base_model = base_model
         self.model_path = model_path
         self.quant_mode = quant_mode
@@ -77,7 +77,7 @@ class WhisperModelLoader:
             try:
                 load_start = time.time()
                 self.device = "cpu"
-                if self.model_path and os.path.exists(self.model_path):
+                if self.model_path and os.path.exists(self.model_path) and False:
                     print(f"Loading Whisper '{self.base_model}' (INT8 weights) on {self.device}...")
                     base_arch = whisper.load_model(self.base_model, device="cpu")
                     dims = base_arch.dims
