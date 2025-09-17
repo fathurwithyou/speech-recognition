@@ -76,8 +76,8 @@ class WhisperModelLoader:
 
             try:
                 load_start = time.time()
-                self.device = "cpu"
-                if self.model_path and os.path.exists(self.model_path):
+                self.device = "cuda"
+                if self.model_path and os.path.exists(self.model_path) and False:
                     print(f"Loading Whisper '{self.base_model}' (INT8 weights) on {self.device}...")
                     base_arch = whisper.load_model(self.base_model, device="cpu")
                     dims = base_arch.dims
