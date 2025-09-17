@@ -4,63 +4,25 @@ import threading
 import logging
 from typing import Dict, Any
 
-from sklearn import base
-import torch
-
 logger = logging.getLogger(__name__)
 
 try:
-    import whisper
-    from whisper.model import Whisper as WhisperCore
-    WHISPER_AVAILABLE = True
+    import mlx_whisper
+    MLX_WHISPER_AVAILABLE = True
 except ImportError:
-    WHISPER_AVAILABLE = False
-    print("OpenAI Whisper not available. Install with: pip install openai-whisper")
+    MLX_WHISPER_AVAILABLE = False
+    print("MLX Whisper not available. Install with: pip install mlx-whisper")
 
 
-def quantize_model_int8(model_fp32, quant_mode: str = "dynamic", copy_model: bool = True):
-    """Apply INT8 quantization using torchao if available; fallback to torch.ao dynamic.
-
-    - quant_mode: 'dynamic' (default) or 'weight_only'
-    """
-    import copy
-    try:
-        from torchao.quantization import (
-            Int8DynamicActivationInt8WeightConfig,
-            Int8WeightOnlyConfig,
-            quantize_,
-        )
-        m = copy.deepcopy(model_fp32) if copy_model else model_fp32
-        if quant_mode == "weight_only":
-            quantize_(m, Int8WeightOnlyConfig())
-            engine = "torchao.weight_only"
-        else:
-            quantize_(m, Int8DynamicActivationInt8WeightConfig())
-            engine = "torchao.dynamic"
-        return m, engine
-    except Exception:
-        try:
-            from torch.ao.quantization import quantize_dynamic
-            m = copy.deepcopy(model_fp32) if copy_model else model_fp32
-            m = quantize_dynamic(m, {torch.nn.Linear}, dtype=torch.qint8)
-            return m, "torch.ao.dynamic"
-        except Exception:
-            return model_fp32, "none"
 
 class WhisperModelLoader:
-    """Simple loader/runner for OpenAI Whisper.
+    """Simple loader/runner for MLX Whisper.
 
-    KISS: load the official model directly (vanilla). If a custom state dict is
-    provided and compatible, that can be added later; for now we prioritize a
-    reliable working path over quantization complexity.
+    Uses MLX Whisper for Apple Silicon optimized inference.
     """
 
-    def __init__(self, base_model: str = "large-v2", model_path: str = os.path.join("openai", "openai_model_int8_sd.pt"), quant_mode: str = "dynamic"):
+    def __init__(self, base_model: str = "mlx-community/whisper-large-v2"):
         self.base_model = base_model
-        self.model_path = model_path
-        self.quant_mode = quant_mode
-        self.model = None
-        self.device = None
         self.model_info: Dict[str, Any] = {}
         self.load_lock = threading.Lock()
         self.is_loaded = False
@@ -70,57 +32,36 @@ class WhisperModelLoader:
             if self.is_loaded and not force_reload:
                 return True
 
-            if not WHISPER_AVAILABLE:
-                print("OpenAI Whisper not available. Install with: pip install openai-whisper")
+            if not MLX_WHISPER_AVAILABLE:
+                print("MLX Whisper not available. Install with: pip install mlx-whisper")
                 return False
 
             try:
                 load_start = time.time()
-                self.device = "cpu"
-                if self.model_path and os.path.exists(self.model_path):
-                    print(f"Loading Whisper '{self.base_model}' (INT8 weights) on {self.device}...")
-                    base_arch = whisper.load_model(self.base_model, device="cpu")
-                    dims = base_arch.dims
-                    del base_arch   
+                print(f"Loading MLX Whisper model '{self.base_model}'...")
 
-                    core = WhisperCore(dims)
-                    core, q_engine = quantize_model_int8(core, quant_mode=self.quant_mode, copy_model=False)
-                    state = torch.load(self.model_path, map_location="cpu", weights_only=False)
-                    missing, unexpected = core.load_state_dict(state, strict=False)
-                    self.model = core.to(self.device)
-                    if missing or unexpected:
-                        print(f"Warning: state dict load had {len(missing)} missing and {len(unexpected)} unexpected keys")
+                # MLX Whisper doesn't require explicit model loading - it loads on first use
+                # We'll validate the model exists by doing a quick test
+                try:
+                    # Test if model is accessible (this will download if needed)
+                    mlx_whisper.load_model(self.base_model)
+                except Exception as e:
+                    print(f"Failed to load model '{self.base_model}': {e}")
+                    return False
 
-                    self.model_info = {
-                        'device': self.device,
-                        'load_time': time.time() - load_start,
-                        'model_type': 'OpenAI Whisper (INT8 state dict)',
-                        'base_model': self.base_model,
-                        'quant_mode': self.quant_mode,
-                        'quant_engine': q_engine,
-                        'torch_version': torch.__version__
-                    }
-                else:
-                    print(f"Loading Whisper '{self.base_model}' on {self.device}...")
-                    self.model = whisper.load_model(self.base_model, device=self.device)
-                    self.model.eval()
-
-                    self.model_info = {
-                        'device': self.device,
-                        'load_time': time.time() - load_start,
-                        'model_type': 'OpenAI Whisper (Vanilla)',
-                        'base_model': self.base_model,
-                        'quant_mode': 'none',
-                        'quant_engine': 'none',
-                        'torch_version': torch.__version__
-                    }
+                self.model_info = {
+                    'load_time': time.time() - load_start,
+                    'model_type': 'MLX Whisper',
+                    'base_model': self.base_model,
+                    'device': 'mps'  # MLX uses Metal Performance Shaders
+                }
                 self.is_loaded = True
-                print(f"Whisper model loaded in {self.model_info['load_time']:.2f}s")
+                print(f"MLX Whisper model loaded in {self.model_info['load_time']:.2f}s")
                 return True
 
             except Exception as e:
                 e = str(e)[:500]  # Truncate long errors
-                print(f"Failed to load Whisper model: {e}")
+                print(f"Failed to load MLX Whisper model: {e}")
                 logger.error(f"Model loading error: {e}")
                 self.is_loaded = False
                 return False
@@ -135,15 +76,14 @@ class WhisperModelLoader:
 
         try:
             t0 = time.perf_counter()
-            with torch.no_grad():
-                result = self.model.transcribe(
-                    audio_path,
-                    language=(language or None),
-                    task="transcribe",
-                    condition_on_previous_text=True,
-                    fp16=False,
-                    verbose=False,
-                )
+
+            # Use MLX Whisper transcribe function
+            result = mlx_whisper.transcribe(
+                audio_path,
+                path_or_hf_repo=self.base_model,
+                language=language if language != "en" else None,  # Let it auto-detect if English
+                verbose=False,
+            )
 
             text = (result.get("text") or "").strip()
             inference_time = time.perf_counter() - t0
@@ -151,16 +91,16 @@ class WhisperModelLoader:
             return {
                 'transcription': text,
                 'confidence': self._estimate_confidence(result),
-                'model_used': f'whisper_{self.base_model}',
+                'model_used': f'mlx_whisper_{self.base_model.replace("/", "_")}',
                 'inference_time': inference_time,
                 'language': result.get('language', language),
                 'segments': len(result.get('segments', [])) if result.get('segments') else 0
             }
 
         except Exception as e:
-            print(f"Whisper inference error for {file_id}: {e}")
+            print(f"MLX Whisper inference error for {file_id}: {e}")
             return {
-                'transcription': f'WHISPER_ERROR: {str(e)[:80]}',
+                'transcription': f'MLX_WHISPER_ERROR: {str(e)[:80]}',
                 'confidence': 0.0,
                 'model_used': 'error',
                 'inference_time': 0.0
