@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: whisper-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP port
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: whisper
+      RABBITMQ_DEFAULT_PASS: whisper123
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - whisper-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '1'
+
+  # Main Whisper Benchmarking Application
+  whisper-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whisper-benchmark
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      # Mount TIMIT evaluation data
+      - ../timit_eval:/app/timit_eval:ro
+      # Mount results output directory
+      - ./benchmark_results:/app/benchmark_results
+      # Mount source code for development
+      - .:/app/src
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=whisper
+      - RABBITMQ_PASS=whisper123
+      - PYTHONPATH=/app
+    networks:
+      - whisper-network
+    # Allocate significant resources for benchmarking
+    deploy:
+      resources:
+        limits:
+          memory: 30G        # 30GB RAM limit
+          cpus: '16'         # 16 CPU cores
+        reservations:
+          memory: 16G        # Reserve 16GB RAM
+          cpus: '8'          # Reserve 8 CPU cores
+    # Enable access to host resources for monitoring
+    privileged: true
+    pid: host
+    stdin_open: true
+    tty: true
+    command: tail -f /dev/null  # Keep container running for interactive use
+
+  # Separate service for running the producer (WebSocket server)
+  whisper-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whisper-producer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8765:8765"      # WebSocket server port
+    volumes:
+      - ../timit_eval:/app/timit_eval:ro
+      - .:/app/src
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=whisper
+      - RABBITMQ_PASS=whisper123
+      - PYTHONPATH=/app
+    networks:
+      - whisper-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '1'
+    working_dir: /app/src
+    command: ["uv", "run", "python", "producer.py"]
+
+  # Redis for caching (optional performance enhancement)
+  redis:
+    image: redis:7-alpine
+    container_name: whisper-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - whisper-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+
+  # Monitoring service for resource usage
+  monitor:
+    image: prom/node-exporter:latest
+    container_name: whisper-monitor
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - whisper-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+volumes:
+  rabbitmq_data:
+  redis_data:
+
+networks:
+  whisper-network:
+    driver: bridge

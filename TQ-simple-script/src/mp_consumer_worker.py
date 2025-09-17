@@ -104,8 +104,10 @@ def process_single_task_worker(task_data):
             'worker_pid': os.getpid()
         }
 
-RABBITMQ_HOST = 'localhost'
-RABBITMQ_PORT = 5672
+import os
+
+RABBITMQ_HOST = os.environ.get('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = int(os.environ.get('RABBITMQ_PORT', '5672'))
 QUEUE_TASK = 'audio_processing_queue'
 
 class MultiprocessingConsumerWorker:

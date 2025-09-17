@@ -15,4 +15,7 @@ dependencies = [
     "openai-whisper>=20231117",
     "scikit-learn>=1.6.1",
     "importlib-metadata>=8.7.0",
+    "psutil>=6.1.0",
+    "matplotlib>=3.9.0",
+    "pandas>=2.2.0",
 ]

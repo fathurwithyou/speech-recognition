@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 from functools import partial
 import threading
 
-RABBITMQ_HOST = 'localhost'
-RABBITMQ_PORT = 5672
+import os
+
+RABBITMQ_HOST = os.environ.get('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = int(os.environ.get('RABBITMQ_PORT', '5672'))
 QUEUE_NAME = 'audio_processing_queue'
 
 def rabbitmq_consumer_thread(client_id, websocket, stop_event, loop):
